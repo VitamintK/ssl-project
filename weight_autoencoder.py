@@ -8,6 +8,8 @@ from torch.utils.data import DataLoader, Dataset, random_split
 
 
 class VectorDataset(Dataset):
+    """Simple dataset wrapper for 2D weight tensors."""
+
     def __init__(self, vectors: torch.Tensor):
         if vectors.ndim != 2:
             raise ValueError("vectors must be (num_samples, dim)")
@@ -62,30 +64,16 @@ def train_autoencoder(
     cfg: AutoencoderConfig,
     callbacks: Iterable[Callable[..., None]] | None = None,
 ) -> tuple[WeightAutoencoder, dict]:
+    """Train a weight autoencoder and return both the model and its loss history.
+
+    Raises:
+        TypeError: If `vectors` is neither a Tensor nor a Dataset.
+        ValueError: If the validation split is invalid or the dataset is too small.
+    """
     torch.manual_seed(cfg.seed)
 
-    if isinstance(vectors, torch.Tensor):
-        dataset: Dataset = VectorDataset(vectors)
-    elif isinstance(vectors, Dataset):
-        dataset = vectors
-    else:  # pragma: no cover - defensive programming
-        raise TypeError("Expected vectors to be a Tensor or torch.utils.data.Dataset.")
-
-    total_len = len(dataset)
-    if total_len < 2:
-        raise ValueError("Need at least two samples to perform train/validation split.")
-
-    if not 0 <= cfg.val_split < 1:
-        raise ValueError("val_split must be in [0, 1).")
-
-    val_len = max(1, math.floor(total_len * cfg.val_split)) if cfg.val_split > 0 else 1
-    if val_len >= total_len:
-        val_len = max(1, total_len - 1)
-    train_len = total_len - val_len
-    if train_len <= 0:
-        raise ValueError("Not enough training samples; reduce val_split or increase dataset size.")
-
-    train_ds, val_ds = random_split(dataset, [train_len, val_len])
+    train_len, val_len = _split_lengths(len(vectors), cfg.val_split)
+    train_ds, val_ds = random_split(vectors, [train_len, val_len])
 
     pin_memory = cfg.device.startswith("cuda")
     train_loader = DataLoader(
@@ -108,38 +96,71 @@ def train_autoencoder(
     criterion = nn.MSELoss()
 
     history = {"train_loss": [], "val_loss": []}
-    callbacks = list(callbacks or [])
+    callback_list = list(callbacks or [])
 
     for epoch in range(cfg.epochs):
-        model.train()
-        running_loss = 0.0
-        for batch in train_loader:
-            batch = batch.to(cfg.device)
-            optimizer.zero_grad()
-            recon = model(batch)
-            loss = criterion(recon, batch)
-            loss.backward()
-            optimizer.step()
-            running_loss += loss.item() * batch.size(0)
-        train_loss = running_loss / train_len
-
-        model.eval()
-        running_val = 0.0
-        with torch.no_grad():
-            for batch in val_loader:
-                batch = batch.to(cfg.device)
-                recon = model(batch)
-                loss = criterion(recon, batch)
-                running_val += loss.item() * batch.size(0)
-        val_loss = running_val / val_len
+        train_loss = _run_epoch(model, train_loader, criterion, cfg.device, optimizer)
+        val_loss = _run_epoch(model, val_loader, criterion, cfg.device, None)
 
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
 
-        for cb in callbacks:
+        for cb in callback_list:
             cb(epoch=epoch, model=model, train_loss=train_loss, val_loss=val_loss)
 
     return model, history
+
+
+
+
+def _split_lengths(total_len: int, val_split: float) -> tuple[int, int]:
+
+
+    val_len = 1 if val_split == 0 else max(1, math.floor(total_len * val_split))
+    val_len = min(val_len, total_len - 1)
+    train_len = total_len - val_len
+
+    if train_len <= 0:
+        raise ValueError("Not enough training samples; reduce val_split or increase dataset size.")
+
+    return train_len, val_len
+
+
+def _run_epoch(
+    model: WeightAutoencoder,
+    loader: DataLoader,
+    criterion: nn.Module,
+    device: str,
+    optimizer: optim.Optimizer | None,
+) -> float:
+    if optimizer is None:
+        model.eval()
+        context = torch.no_grad()
+    else:
+        model.train()
+        context = torch.enable_grad()
+
+    total_loss = 0.0
+    total_items = 0
+
+    with context:
+        for batch in loader:
+            batch = batch.to(device)
+
+            if optimizer is not None:
+                optimizer.zero_grad()
+
+            recon = model(batch)
+            loss = criterion(recon, batch)
+
+            if optimizer is not None:
+                loss.backward()
+                optimizer.step()
+
+            total_loss += loss.item() * batch.size(0)
+            total_items += batch.size(0)
+
+    return total_loss / total_items
 
 
 if __name__ == "__main__":

@@ -13,13 +13,8 @@ from torch import nn, optim
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset
 
-try:
-    from torchvision import datasets, transforms
-except ModuleNotFoundError as exc:  # pragma: no cover - handled at runtime
-    raise ModuleNotFoundError(
-        "torchvision is required for the MNIST sanity check. "
-        "Install it via `pip install torchvision`."
-    ) from exc
+from torchvision import datasets, transforms
+
 
 # Allow running this script directly without installing as a package.
 THIS_DIR = pathlib.Path(__file__).resolve().parent
@@ -78,21 +73,15 @@ def vector_to_module(
 
     with torch.no_grad():
         for meta in metadata:
-            if meta.name not in params_dict:
-                raise KeyError(f"Parameter {meta.name} missing in target module.")
-
+ 
             numel = meta.numel
             slice_ = vector[offset : offset + numel]
-            if slice_.numel() != numel:
-                raise ValueError("Vector length does not match metadata.")
 
             param = params_dict[meta.name]
             reshaped = slice_.to(param.device, dtype=meta.dtype).view(meta.shape)
             param.copy_(reshaped)
             offset += numel
 
-    if offset != vector.numel():
-        raise ValueError("Vector contained extra data beyond metadata description.")
 
 
 class MNISTMLP(nn.Module):
@@ -210,11 +199,7 @@ def load_classifier_checkpoint(
     device: torch.device,
 ) -> tuple[MNISTMLP, dict]:
     checkpoint_path = checkpoint_path.resolve()
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(
-            f"MNIST checkpoint not found at {checkpoint_path}. "
-            "Run this script without --test-encoder to create it first."
-        )
+
     checkpoint = torch.load(str(checkpoint_path), map_location=device)
     state_dict = checkpoint.get("state_dict", checkpoint)
     model = MNISTMLP().to(device)
@@ -224,10 +209,7 @@ def load_classifier_checkpoint(
 
 class NoisyVectorDataset(Dataset):
     def __init__(self, base_vector: torch.Tensor, samples: int, noise_std: float, seed: int | None = None, include_original: bool = True):
-        if base_vector.ndim != 1:
-            raise ValueError('base_vector must be one-dimensional')
-        if samples < 1:
-            raise ValueError('samples must be at least 1')
+
         self.base = base_vector.detach().cpu().float()
         self.samples = samples
         self.noise_std = noise_std
@@ -268,8 +250,6 @@ def build_autoencoder_dataset(
         include_original: Whether to ensure the first sample equals the pristine weights.
         seed: Optional seed for deterministic noise sampling.
     """
-    if samples < 1:
-        raise ValueError("samples must be at least 1")
 
     base_vector = weight_vector.detach().cpu().float()
     return NoisyVectorDataset(
@@ -322,8 +302,7 @@ def mnist_weight_autoencoder_demo(
         epoch = kwargs.get("epoch")
         train_loss = kwargs.get("train_loss")
         val_loss = kwargs.get("val_loss")
-        if isinstance(epoch, int) and isinstance(train_loss, float) and isinstance(val_loss, float):
-            print(f"AE Epoch {epoch+1}/{ae_cfg.epochs}: train_loss={train_loss:.6f}, val_loss={val_loss:.6f}")
+        print(f"AE Epoch {epoch+1}/{ae_cfg.epochs}: train_loss={train_loss:.6f}, val_loss={val_loss:.6f}")
 
     autoencoder, ae_history = train_autoencoder(ae_dataset, ae_cfg, callbacks=[log_autoencoder_epoch])
     print("Autoencoder training complete.")
