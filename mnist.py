@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import copy
 import dataclasses
 import pathlib
@@ -24,6 +25,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - handled at runtime
 THIS_DIR = pathlib.Path(__file__).resolve().parent
 if str(THIS_DIR) not in sys.path:
     sys.path.append(str(THIS_DIR))
+
+DEFAULT_CHECKPOINT_PATH = THIS_DIR / "checkpoints" / "mnist.pt"
 
 from weight_autoencoder import AutoencoderConfig, train_autoencoder  # type: ignore  # noqa: E402
 
@@ -186,6 +189,38 @@ def train_classifier(cfg: MNISTConfig) -> tuple[MNISTMLP, dict, DataLoader]:
     return model, history, test_loader
 
 
+def save_classifier_checkpoint(
+    model: MNISTMLP,
+    checkpoint_path: pathlib.Path,
+    cfg: MNISTConfig,
+    history: dict,
+) -> None:
+    checkpoint_path = checkpoint_path.resolve()
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "state_dict": model.state_dict(),
+        "mnist_config": dataclasses.asdict(cfg),
+        "history": history,
+    }
+    torch.save(payload, str(checkpoint_path))
+
+
+def load_classifier_checkpoint(
+    checkpoint_path: pathlib.Path,
+    device: torch.device,
+) -> tuple[MNISTMLP, dict]:
+    checkpoint_path = checkpoint_path.resolve()
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(
+            f"MNIST checkpoint not found at {checkpoint_path}. "
+            "Run this script without --test-encoder to create it first."
+        )
+    checkpoint = torch.load(str(checkpoint_path), map_location=device)
+    state_dict = checkpoint.get("state_dict", checkpoint)
+    model = MNISTMLP().to(device)
+    model.load_state_dict(state_dict)
+    return model, checkpoint
+
 
 class NoisyVectorDataset(Dataset):
     def __init__(self, base_vector: torch.Tensor, samples: int, noise_std: float, seed: int | None = None, include_original: bool = True):
@@ -251,11 +286,24 @@ def mnist_weight_autoencoder_demo(
     ae_cfg: AutoencoderConfig,
     ae_samples: int = 2048,
     ae_noise_std: float = 0.01,
+    *,
+    test_encoder: bool = False,
+    checkpoint_path: pathlib.Path | None = None,
 ) -> None:
     """Train MNIST classifier, autoencode its weights, and report accuracy delta."""
+    checkpoint_path = checkpoint_path or DEFAULT_CHECKPOINT_PATH
     device = torch.device(mnist_cfg.device)
-    model, history, test_loader = train_classifier(mnist_cfg)
-    base_acc = history["test_acc"][-1]
+    if test_encoder:
+        model, _ = load_classifier_checkpoint(checkpoint_path, device)
+        print(f"Loaded MNIST checkpoint from {checkpoint_path}")
+        _, test_loader = get_dataloaders(mnist_cfg.batch_size)
+        base_acc = evaluate(model, test_loader, device)
+    else:
+        model, history, test_loader = train_classifier(mnist_cfg)
+        save_classifier_checkpoint(model, checkpoint_path, mnist_cfg, history)
+        print(f"Saved MNIST checkpoint to {checkpoint_path}")
+        base_acc = history["test_acc"][-1]
+
     print(f"Baseline accuracy: {base_acc:.4f}")
 
     weight_vector, metadata = module_to_vector(model)
@@ -269,7 +317,15 @@ def mnist_weight_autoencoder_demo(
         noise_std=ae_noise_std,
         seed=mnist_cfg.seed,
     )
-    autoencoder, ae_history = train_autoencoder(ae_dataset, ae_cfg)
+
+    def log_autoencoder_epoch(**kwargs: object) -> None:
+        epoch = kwargs.get("epoch")
+        train_loss = kwargs.get("train_loss")
+        val_loss = kwargs.get("val_loss")
+        if isinstance(epoch, int) and isinstance(train_loss, float) and isinstance(val_loss, float):
+            print(f"AE Epoch {epoch+1}/{ae_cfg.epochs}: train_loss={train_loss:.6f}, val_loss={val_loss:.6f}")
+
+    autoencoder, ae_history = train_autoencoder(ae_dataset, ae_cfg, callbacks=[log_autoencoder_epoch])
     print("Autoencoder training complete.")
 
     with torch.no_grad():
@@ -289,15 +345,44 @@ def mnist_weight_autoencoder_demo(
     print(f"Autoencoder final losses: train={ae_history['train_loss'][-1]:.6f}, val={ae_history['val_loss'][-1]:.6f}")
 
 
-if __name__ == "__main__":
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train MNIST classifier and autoencode its weights.")
+    parser.add_argument(
+        "--test-encoder",
+        action="store_true",
+        help="Skip MNIST training and load the classifier weights from a checkpoint.",
+    )
+    parser.add_argument(
+        "--checkpoint-path",
+        type=pathlib.Path,
+        default=DEFAULT_CHECKPOINT_PATH,
+        help=f"Path to MNIST checkpoint (default: {DEFAULT_CHECKPOINT_PATH}).",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    args = parse_args(argv)
+
     mnist_cfg = MNISTConfig(epochs=5)
     ae_cfg = AutoencoderConfig(
         input_dim=0,
-        hidden_dims=(256,256),
+        hidden_dims=(256, 256),
         bottleneck_dim=128,
         epochs=5,
         batch_size=256,
         lr=1e-3,
     )
 
-    mnist_weight_autoencoder_demo(mnist_cfg, ae_cfg, ae_noise_std=0.005, ae_samples=4096)
+    mnist_weight_autoencoder_demo(
+        mnist_cfg,
+        ae_cfg,
+        ae_noise_std=2,
+        ae_samples=4096,
+        test_encoder=args.test_encoder,
+        checkpoint_path=args.checkpoint_path,
+    )
+
+
+if __name__ == "__main__":
+    main()
