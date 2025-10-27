@@ -45,7 +45,7 @@ def get_expected_payoffs(game: pyspiel.Game, p0_ppo_agent: ppo.PPOAgent, p1_poli
         payoffs.append(payoff)
     return np.mean(payoffs)
 
-def diverse_random_kuhn_poker_layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+def diverse_random_kuhn_poker_layer_init(game, layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, 2.2)
     if layer.out_features == game.num_distinct_actions():
         torch.nn.init.uniform(layer.bias, -1, 1)
