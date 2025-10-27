@@ -1,6 +1,7 @@
 import math
-from dataclasses import dataclass
-from typing import Callable, Iterable, Sequence, Union
+import os
+from dataclasses import asdict, dataclass
+from typing import Any, Callable, Iterable, Sequence, Union
 
 import torch
 from torch import nn, optim
@@ -20,6 +21,22 @@ class VectorDataset(Dataset):
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         return self.vectors[idx]
+
+
+def encoder_fn(ppo_agent: Any) -> torch.Tensor:
+    """Flatten all actor parameters from a PPO agent for autoencoder input."""
+    actor = getattr(ppo_agent, "actor", None)
+    if actor is None:
+        raise AttributeError("ppo_agent must expose an 'actor' attribute.")
+    if not isinstance(actor, nn.Module):
+        raise TypeError("ppo_agent.actor must be an nn.Module.")
+
+    params = [param.detach() for param in actor.parameters()]
+    if not params:
+        raise ValueError("ppo_agent.actor has no parameters to extract.")
+
+    # Use Torch helper to produce a single contiguous 1D tensor of all weights.
+    return nn.utils.parameters_to_vector(params).detach()
 
 
 class WeightAutoencoder(nn.Module):
@@ -111,6 +128,41 @@ def train_autoencoder(
     return model, history
 
 
+def save_autoencoder(
+    model: WeightAutoencoder,
+    path: str | os.PathLike[str],
+    cfg: AutoencoderConfig | None = None,
+) -> None:
+    """Persist the autoencoder weights and optionally its config."""
+    checkpoint: dict[str, Any] = {"state_dict": model.state_dict()}
+    if cfg is not None:
+        checkpoint["config"] = asdict(cfg)
+    torch.save(checkpoint, path)
+
+
+def load_autoencoder(
+    path: str | os.PathLike[str],
+    cfg: AutoencoderConfig | None = None,
+    device: str | torch.device | None = None,
+) -> tuple[WeightAutoencoder, AutoencoderConfig]:
+    """Restore the autoencoder and return the model along with the resolved config."""
+    checkpoint = torch.load(path, map_location=device or "cpu")
+
+    state_dict = checkpoint.get("state_dict")
+    if state_dict is None:
+        raise ValueError("Checkpoint is missing 'state_dict'.")
+
+    saved_cfg = checkpoint.get("config")
+    if cfg is None:
+        if saved_cfg is None:
+            raise ValueError("AutoencoderConfig is required to instantiate the model.")
+        cfg = AutoencoderConfig(**saved_cfg)
+
+    model = WeightAutoencoder(cfg.input_dim, cfg.hidden_dims, cfg.bottleneck_dim)
+    model.load_state_dict(state_dict)
+    target_device = device or cfg.device
+    model.to(target_device)
+    return model, cfg
 
 
 def _split_lengths(total_len: int, val_split: float) -> tuple[int, int]:
