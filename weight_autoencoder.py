@@ -115,9 +115,7 @@ def train_autoencoder(
 
 def _split_lengths(total_len: int, val_split: float) -> tuple[int, int]:
 
-
-    val_len = 1 if val_split == 0 else max(1, math.floor(total_len * val_split))
-    val_len = min(val_len, total_len - 1)
+    val_len  = math.floor(total_len * val_split)
     train_len = total_len - val_len
 
     if train_len <= 0:
