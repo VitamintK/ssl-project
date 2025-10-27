@@ -45,19 +45,22 @@ def get_expected_payoffs(game: pyspiel.Game, p0_ppo_agent: ppo.PPOAgent, p1_poli
         payoffs.append(payoff)
     return np.mean(payoffs)
 
-def diverse_random_kuhn_poker_layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, 2.2)
-    if layer.out_features == game.num_distinct_actions():
-        torch.nn.init.uniform(layer.bias, -1, 1)
-    else:
-        torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
+def make_diverse_random_kuhn_poker_layer_init(game):
+    def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+        torch.nn.init.orthogonal_(layer.weight, 2.2)
+        if layer.out_features == game.num_distinct_actions():
+            torch.nn.init.uniform(layer.bias, -1, 1)
+        else:
+            torch.nn.init.constant_(layer.bias, bias_const)
+        return layer
+    return layer_init
 
 if __name__ == '__main__':
     game = pyspiel.load_game('kuhn_poker')
     num_actions = game.num_distinct_actions()
     observation_shape = game.information_state_tensor_shape()
     # Here is how you can randomly initialize the weights of a PPO agent for Kuhn Poker:
+    diverse_random_kuhn_poker_layer_init = make_diverse_random_kuhn_poker_layer_init(game)
     x = ppo.PPOAgent(num_actions, observation_shape, 'cpu', diverse_random_kuhn_poker_layer_init)
     uniform_random_policy = policy.UniformRandomPolicy(game)
     print(get_expected_payoffs(game, x, uniform_random_policy))
