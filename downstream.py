@@ -29,7 +29,7 @@ set_seed(42)
 class PayoffModel(nn.Module):
     """Simple MLP to predict payoffs from agent embeddings."""
 
-    def __init__(self, embedding_dim: int, hidden_dims: List[int] = [128, 64, 32]):
+    def __init__(self, embedding_dim: int, hidden_dims: List[int], dropout: float):
         super().__init__()
 
         layers = []
@@ -39,7 +39,7 @@ class PayoffModel(nn.Module):
             layers.extend([
                 nn.Linear(prev_dim, hidden_dim),
                 nn.ReLU(),
-                nn.Dropout(0.2)
+                nn.Dropout(dropout)
             ])
             prev_dim = hidden_dim
 
@@ -69,7 +69,8 @@ class PayoffPredictor:
         ppo_agents: List[Any],
         opponent_policy: Any,
         encoder_fn: Callable,
-        hidden_dims: List[int] = [128, 64, 32],
+        hidden_dims: List[int],
+        dropout: float,
         device: str = "cpu"
     ):
         """
@@ -105,14 +106,17 @@ class PayoffPredictor:
         # Initialize the predictor model
         self.model = PayoffModel(
             self.embedding_dim,
-            hidden_dims=hidden_dims
+            hidden_dims=hidden_dims,
+            dropout=dropout
         ).to(device)
 
         self.optimizer = None
         self.criterion = nn.MSELoss()
 
-        # Store ground truth payoffs (will be computed during training)
         self.ground_truth_payoffs = None
+
+        self.train_indices = None
+        self.val_indices = None
 
     def compute_ground_truth_payoffs(self):
         """Compute ground truth payoffs for all agents."""
@@ -157,6 +161,10 @@ class PayoffPredictor:
 
         train_indices = indices[n_val:]
         val_indices = indices[:n_val]
+
+        # Store indices for later evaluation
+        self.train_indices = train_indices
+        self.val_indices = val_indices
 
         X_train = torch.FloatTensor(self.embeddings[train_indices]).to(self.device)
         y_train = torch.FloatTensor(self.ground_truth_payoffs[train_indices]).to(self.device)
@@ -235,19 +243,36 @@ class PayoffPredictor:
             prediction = self.model(embedding_tensor)
             return prediction.item()
 
-    def evaluate(self, test_agents: List[Any] = None):
+    def evaluate(self, test_agents: List[Any] = None, eval_set: str = "all"):
         """
         Evaluate the model on test agents.
 
         Args:
-            test_agents: List of test agents. If None, uses training agents.
+            test_agents: List of test agents. If None, uses agents based on eval_set.
+            eval_set: Which set to evaluate on: "all", "train", or "val". Only used if test_agents is None.
 
         Returns:
-            dict: Evaluation metrics (MSE, MAE, R�)
+            dict: Evaluation metrics (MSE, MAE, R2)
         """
         if test_agents is None:
-            test_agents = self.ppo_agents
-            test_payoffs = self.ground_truth_payoffs
+            # Use stored train/val split if available
+            if eval_set == "train" and self.train_indices is not None:
+                indices = self.train_indices
+                test_agents = [self.ppo_agents[i] for i in indices]
+                test_payoffs = self.ground_truth_payoffs[indices]
+                print(f"Evaluating on training set ({len(indices)} agents)...")
+            elif eval_set == "val" and self.val_indices is not None:
+                indices = self.val_indices
+                test_agents = [self.ppo_agents[i] for i in indices]
+                test_payoffs = self.ground_truth_payoffs[indices]
+                print(f"Evaluating on validation set ({len(indices)} agents)...")
+            elif eval_set == "all":
+                test_agents = self.ppo_agents
+                test_payoffs = self.ground_truth_payoffs
+                print(f"Evaluating on all agents ({len(test_agents)} agents)...")
+            else:
+                raise ValueError(f"Invalid eval_set: {eval_set}. Must be 'all', 'train', or 'val'. "
+                               f"Also ensure train() has been called to create the split.")
         else:
             print("Computing ground truth for test agents...")
             test_payoffs = np.array([
