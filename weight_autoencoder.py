@@ -161,6 +161,34 @@ def _run_epoch(
     return total_loss / total_items
 
 
+def get_encoder(autoencoder: WeightAutoencoder, device: str = "cpu") -> callable:
+    """
+    Get the encoder part of a trained autoencoder as a callable function.
+
+    Args:
+        autoencoder: Trained WeightAutoencoder model
+        device: Device to run the encoder on
+
+    Returns:
+        encoder_fn: Function that takes a weight vector and returns its bottleneck embedding
+    """
+    autoencoder.eval()
+    autoencoder.to(device)
+
+    def encoder_fn(weights: torch.Tensor) -> torch.Tensor:
+        """Encode weights into bottleneck representation."""
+        with torch.no_grad():
+            if not isinstance(weights, torch.Tensor):
+                weights = torch.tensor(weights)
+            weights = weights.float().to(device)
+            if weights.ndim == 1:
+                weights = weights.unsqueeze(0)
+            embedding = autoencoder.encoder(weights)
+            return embedding.squeeze(0)
+
+    return encoder_fn
+
+
 if __name__ == "__main__":
     print("Training Weight Autoencoder on synthetic data...")
     dim, samples = 1024, 10_000
