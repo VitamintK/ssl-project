@@ -7,7 +7,6 @@ from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
 from utils import make_diverse_random_kuhn_poker_layer_init
 from downstream import PayoffPredictor, set_seed
 from weight_autoencoder import (
-    WeightAutoencoder,
     AutoencoderConfig,
     train_autoencoder,
     VectorDataset,
@@ -15,33 +14,19 @@ from weight_autoencoder import (
 )
 
 
-def test_kuhn_poker_example():
+def test_downstream_task_a(game: pyspiel.Game):
     """
     Test the PayoffPredictor on Kuhn Poker with the specified configuration.
     """
-
-    # Load Kuhn Poker game
-    game = pyspiel.load_game("kuhn_poker")
+    game_short_name = game.short_name
     info_state_size = game.information_state_tensor_shape()
     num_actions = game.num_distinct_actions()
 
-    # Create opponent policy (UniformRandomPolicy)
     opponent_policy = policy_lib.UniformRandomPolicy(game)
 
-    # Create random PPO agents using diverse initialization
-    print("Creating random PPO agents...")
-    num_agents = 300
-    ppo_agents = []
-
-    for _ in tqdm(range(num_agents)):
-        layer_init = make_diverse_random_kuhn_poker_layer_init(game)
-        agent = PPOAgent(
-            num_actions=num_actions,
-            observation_shape=info_state_size,
-            device="cpu",
-            layer_init=layer_init
-        )
-        ppo_agents.append(agent)
+    NUM_AGENTS = 300
+    layer_init = make_diverse_random_kuhn_poker_layer_init(game)
+    ppo_agents = [PPOAgent(num_actions, info_state_size, 'cpu', layer_init) for i in range(NUM_AGENTS)]
 
     # Extract weights from all agents for training the autoencoder
     print("\nExtracting weights from agents...")
@@ -73,7 +58,6 @@ def test_kuhn_poker_example():
 
     # Create encoder function using the trained autoencoder
     ae_encoder = get_encoder(autoencoder, device="cpu")
-
     def encoder_fn(ppo_agent):
         """Extract weights from first layer and encode using autoencoder."""
         first_layer = ppo_agent.actor[0]
@@ -118,11 +102,14 @@ def test_kuhn_poker_example():
     print(f"R2: {train_metrics['r2']:.6f}")
 
     # Save the model
-    predictor.save("payoff_predictor_kuhn.pth")
+    predictor.save(f"payoff_predictor_{game_short_name}.pth")
 
     return predictor, history, val_metrics, train_metrics
 
 
 if __name__ == "__main__":
     set_seed(42)
-    test_kuhn_poker_example()
+    game = pyspiel.load_game("kuhn_poker")
+    test_downstream_task_a(game)
+    game = pyspiel.load_game("leduc_poker")
+    test_downstream_task_a(game)

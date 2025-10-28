@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import random
-from typing import List, Callable, Any
+from typing import List, Callable, Any, Optional
 from tqdm import tqdm
 
 from utils import get_expected_payoffs
@@ -24,16 +24,15 @@ def set_seed(seed=42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-
 class PayoffModel(nn.Module):
     """Simple MLP to predict payoffs from agent embeddings."""
 
-    def __init__(self, embedding_dim: int, hidden_dims: List[int], dropout: float):
+    def __init__(self, embedding_dim: int, hidden_dims: Optional[List[int]] = None, dropout: float = 0.0):
         super().__init__()
-
+        if hidden_dims is None:
+            hidden_dims = [128, 64, 32]
         layers = []
         prev_dim = embedding_dim
-
         for hidden_dim in hidden_dims:
             layers.extend([
                 nn.Linear(prev_dim, hidden_dim),
@@ -41,15 +40,12 @@ class PayoffModel(nn.Module):
                 nn.Dropout(dropout)
             ])
             prev_dim = hidden_dim
-
         # Output layer
         layers.append(nn.Linear(prev_dim, 1))
-
         self.network = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.network(x).squeeze(-1)
-
 
 class PayoffPredictor:
     """
@@ -242,7 +238,7 @@ class PayoffPredictor:
             prediction = self.model(embedding_tensor)
             return prediction.item()
 
-    def evaluate(self, test_agents: List[Any] = None, eval_set: str = "all"):
+    def evaluate(self, test_agents: Optional[List[Any]] = None, eval_set: str = "all"):
         """
         Evaluate the model on test agents.
 
