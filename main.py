@@ -18,7 +18,7 @@ def test_downstream_task_a(game: pyspiel.Game):
     """
     Test the PayoffPredictor on Kuhn Poker with the specified configuration.
     """
-    game_short_name = game.short_name
+    game_short_name = game.get_type().short_name
     info_state_size = game.information_state_tensor_shape()
     num_actions = game.num_distinct_actions()
 
