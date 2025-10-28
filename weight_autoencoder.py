@@ -207,7 +207,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--num-agents", type=int, default=1000, help="Number of random PPO agents to encode.")
     parser.add_argument("--ppo-agent-hidden-size", type=int, default=256, help="Hidden size for the PPO agent.")
     parser.add_argument("--seed", type=int, default=None, help="Optional random seed.")
-    parser.add_argument("--device", type=str, default="cpu", help="Torch device for agent instantiation.")
+    parser.add_argument("--device", type=str, default=None, help="Torch device for agent instantiation.")
     parser.add_argument("--game", type=str, default="kuhn_poker", help="OpenSpiel game name.")
     parser.add_argument(
         "--output",
@@ -221,7 +221,7 @@ def _parse_args() -> argparse.Namespace:
         default='checkpoints/',
         help="Optional checkpoint path for the trained autoencoder.",
     )
-    parser.add_argument("--hidden-dims", type=hidden_dims_arg, default=(64, 64), help="Comma separated hidden dims.")
+    parser.add_argument("--hidden-dims", type=hidden_dims_arg, default=(1024, 512), help="Comma separated hidden dims.")
     parser.add_argument("--bottleneck-dim", type=int, default=64, help="Autoencoder latent dimension size.")
     parser.add_argument("--epochs", type=int, default=20, help="Training epochs for the autoencoder.")
     parser.add_argument("--batch-size", type=int, default=16, help="Autoencoder training batch size.")
@@ -239,6 +239,10 @@ if __name__ == "__main__":
 
     args = _parse_args()
 
+    if (device := args.device) is None:
+        device = utils.get_device_string()
+    print(f"Using device: {device}")
+    
     game = pyspiel.load_game(args.game)
     game_short_name = game.get_type().short_name
     info_state_size = game.information_state_tensor_shape()
@@ -258,7 +262,7 @@ if __name__ == "__main__":
         weight_decay=args.weight_decay,
         val_split=args.val_split,
         seed=args.seed if args.seed is not None else 0,
-        device=args.device,
+        device=device,
     )
     weight_autoencoder = WeightAutoencoder(ae_config, ppo_agents, ppo_agent_to_vector)
     _, ae_history = weight_autoencoder.train()
