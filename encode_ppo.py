@@ -96,7 +96,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--autoencoder-output",
         type=str,
-        default=None,
+        default='checkpoints/',
         help="Optional checkpoint path for the trained autoencoder.",
     )
     parser.add_argument("--hidden-dims", type=hidden_dims_arg, default=(64, 64), help="Comma separated hidden dims.")
@@ -142,8 +142,8 @@ def main() -> None:
     print(f"Trained autoencoder. Final train loss: {final_train:.6f}, val loss: {final_val:.6f}")
 
     if args.autoencoder_output is not None:
-        save_autoencoder(model, args.autoencoder_output, cfg)
-        print(f"Saved autoencoder checkpoint to {args.autoencoder_output}")
+        checkpoint_path = save_autoencoder(model, args.autoencoder_output, cfg)
+        print(f"Saved autoencoder checkpoint to {checkpoint_path}")
 
 
 if __name__ == "__main__":

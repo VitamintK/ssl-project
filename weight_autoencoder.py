@@ -1,6 +1,7 @@
 import math
 import os
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence, Union
 
 import torch
@@ -138,12 +139,27 @@ def save_autoencoder(
     model: WeightAutoencoder,
     path: str | os.PathLike[str],
     cfg: AutoencoderConfig | None = None,
-) -> None:
-    """Persist the autoencoder weights and optionally its config."""
+) -> Path:
+    """Persist the autoencoder weights and optionally its config, returning the saved path."""
     checkpoint: dict[str, Any] = {"state_dict": model.state_dict()}
     if cfg is not None:
         checkpoint["config"] = asdict(cfg)
-    torch.save(checkpoint, path)
+    target_path = Path(path)
+
+    # Treat missing suffix or trailing separator as a directory intent.
+    directory_intent = (
+        (target_path.exists() and target_path.is_dir())
+        or str(path).endswith(os.sep)
+        or (target_path.suffix == "" and not target_path.parent.exists())
+    )
+    if directory_intent:
+        target_path.mkdir(parents=True, exist_ok=True)
+        target_path = target_path / "autoencoder.pt"
+    else:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    torch.save(checkpoint, target_path)
+    return target_path
 
 
 def load_autoencoder(
