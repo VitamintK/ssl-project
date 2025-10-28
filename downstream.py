@@ -24,7 +24,6 @@ def set_seed(seed=42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-set_seed(42)
 
 class PayoffModel(nn.Module):
     """Simple MLP to predict payoffs from agent embeddings."""
