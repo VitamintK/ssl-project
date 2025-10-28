@@ -4,16 +4,43 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence, Union
 
+
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader, Dataset, random_split
 from tqdm import tqdm
 
 
-class VectorDataset(Dataset):
-    """Simple dataset wrapper for 2D weight tensors."""
+import argparse
+from typing import Callable
 
-    def __init__(self, vectors: torch.Tensor):
+
+import pyspiel
+
+from iig_rl_benchmark.algorithms.ppo import ppo
+
+
+import utils
+Initializer = Callable[[nn.Module, float, float], nn.Module]
+
+class VectorDataset(Dataset):
+    """Dataset wrapper for weight vectors derived from PPO agents or raw tensors."""
+
+    def __init__(
+        self,
+        data: Union[torch.Tensor, Sequence[Any]],
+        transform: Callable[[Any], torch.Tensor] | None = None,
+    ):
+        if isinstance(data, torch.Tensor):
+            vectors = data
+        else:
+            if not isinstance(data, Sequence):
+                raise TypeError("data must be a tensor or a sequence of PPO agents.")
+            if len(data) == 0:
+                raise ValueError("data sequence must not be empty.")
+            transform = transform or encoder_fn
+            vectors = torch.stack([transform(agent) for agent in data])
+
         if vectors.ndim != 2:
             raise ValueError("vectors must be (num_samples, dim)")
         self.vectors = vectors.float()
@@ -79,7 +106,7 @@ class AutoencoderConfig:
 
 
 def train_autoencoder(
-    vectors: Union[torch.Tensor, Dataset],
+    agents: Sequence[ppo.PPOAgent],
     cfg: AutoencoderConfig,
     callbacks: Iterable[Callable[..., None]] | None = None,
 ) -> tuple[WeightAutoencoder, dict]:
@@ -89,6 +116,9 @@ def train_autoencoder(
         TypeError: If `vectors` is neither a Tensor nor a Dataset.
         ValueError: If the validation split is invalid or the dataset is too small.
     """
+
+    vectors = VectorDataset(agents)  #takes list of tensor and convert to dataset
+
     torch.manual_seed(cfg.seed)
 
     train_len, val_len = _split_lengths(len(vectors), cfg.val_split)
@@ -235,12 +265,109 @@ def _run_epoch(
     return total_loss / total_items
 
 
+
+
+def build_ppo_agent(
+    game: pyspiel.Game,
+    device: str,
+    init_fn: Initializer,
+) -> ppo.PPOAgent:
+    """Instantiate a randomly initialized PPOAgent for the given game."""
+    num_actions = game.num_distinct_actions()
+    observation_shape = game.information_state_tensor_shape()
+    return ppo.PPOAgent(num_actions, observation_shape, device, init_fn)
+
+
+def generate_random_agents(
+    num_agents: int = 100,
+    seed: int | None = None,
+    device: str = "cpu",
+    game_name: str = "kuhn_poker",
+) -> torch.Tensor:
+    """Create `num_agents` random PPO agents and encode their actor weights."""
+    if num_agents <= 0:
+        raise ValueError("num_agents must be positive.")
+
+    if seed is not None:
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
+    game = pyspiel.load_game(game_name)
+    utils.game = game
+    num_actions = game.num_distinct_actions()
+    init_fn = utils.diverse_random_kuhn_poker_layer_init
+
+    encoded_vectors: list[torch.Tensor] = []
+    for _ in range(num_agents):
+        agent = build_ppo_agent(game, device, init_fn)
+        encoded_vectors.append(encoder_fn(agent))
+
+    vectors = torch.stack(list(encoded_vectors))
+    return vectors
+
+
+def _parse_args() -> argparse.Namespace:
+    def hidden_dims_arg(value: str) -> tuple[int, ...]:
+        dims = [int(v.strip()) for v in value.split(",") if v.strip()]
+        if not dims:
+            raise argparse.ArgumentTypeError("hidden dims must not be empty")
+        return tuple(dims)
+
+    parser = argparse.ArgumentParser(description="Encode random PPO agents for weight autoencoding.")
+    parser.add_argument("--num-agents", type=int, default=100, help="Number of random PPO agents to encode.")
+    parser.add_argument("--seed", type=int, default=None, help="Optional random seed.")
+    parser.add_argument("--device", type=str, default="cpu", help="Torch device for agent instantiation.")
+    parser.add_argument("--game", type=str, default="kuhn_poker", help="OpenSpiel game name.")
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Optional path to save the stacked weight vectors as a .pt file.",
+    )
+    parser.add_argument(
+        "--autoencoder-output",
+        type=str,
+        default='checkpoints/',
+        help="Optional checkpoint path for the trained autoencoder.",
+    )
+    parser.add_argument("--hidden-dims", type=hidden_dims_arg, default=(64, 64), help="Comma separated hidden dims.")
+    parser.add_argument("--bottleneck-dim", type=int, default=64, help="Autoencoder latent dimension size.")
+    parser.add_argument("--epochs", type=int, default=50, help="Training epochs for the autoencoder.")
+    parser.add_argument("--batch-size", type=int, default=16, help="Autoencoder training batch size.")
+    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate for autoencoder training.")
+    parser.add_argument("--weight-decay", type=float, default=0.0, help="Weight decay for optimizer.")
+    parser.add_argument("--val-split", type=float, default=0.1, help="Validation split proportion.")
+    return parser.parse_args()
+
 if __name__ == "__main__":
-    print("Training Weight Autoencoder on synthetic data...")
-    dim, samples = 1024, 10_000
-    synthetic_vectors = torch.randn(samples, dim)
+    args = _parse_args()
 
-    cfg = AutoencoderConfig(input_dim=dim, bottleneck_dim=32, hidden_dims=(256, 128), epochs=10)
-    model, hist = train_autoencoder(synthetic_vectors, cfg)
 
-    print(hist["train_loss"][-1], hist["val_loss"][-1])
+    agents = generate_random_agents(
+        num_agents=args.num_agents,
+        seed=args.seed,
+        device=args.device,
+        game_name=args.game,
+    )
+
+    cfg = AutoencoderConfig(
+        input_dim=agents.shape[1],
+        hidden_dims=args.hidden_dims,
+        bottleneck_dim=args.bottleneck_dim,
+        lr=args.lr,
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        weight_decay=args.weight_decay,
+        val_split=args.val_split,
+        seed=args.seed if args.seed is not None else 0,
+        device=args.device,
+    )
+    model, history = train_autoencoder(agents, cfg)
+    
+    final_train = history["train_loss"][-1]
+    final_val = history["val_loss"][-1]
+    print(f"Trained autoencoder. Final train loss: {final_train:.6f}, val loss: {final_val:.6f}")
+
+    if args.autoencoder_output is not None:
+        checkpoint_path = save_autoencoder(model, args.autoencoder_output, cfg)
+        print(f"Saved autoencoder checkpoint to {checkpoint_path}
