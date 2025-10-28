@@ -14,3 +14,4 @@ checkpoints/
 *.pyc
 *.gz
 *.pt
+*.pth
