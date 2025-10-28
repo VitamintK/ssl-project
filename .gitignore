@@ -5,9 +5,12 @@ build/
 dist/
 wheels/
 *.egg-info
+data/
+checkpoints/
+
 
 # Virtual environments
 .venv
-
-# Model checkpoints
-*.pth
+*.pyc
+*.gz
+*.pt
