@@ -4,20 +4,15 @@ import torch
 from torch import nn
 from pathlib import Path
 
-from tqdm import tqdm
 from open_spiel.python import policy as policy_lib
 from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
 from utils import make_diverse_random_kuhn_poker_layer_init
 from downstream import PayoffPredictor, set_seed
 from weight_autoencoder import (
     AutoencoderConfig,
-    train_autoencoder,
-    VectorDataset,
-    get_encoder,
+    WeightAutoencoder,
+    ppo_agent_to_vector,
 )
-
-
-
 
 def test_downstream_task_a(
         game: pyspiel.Game,
@@ -40,28 +35,15 @@ def test_downstream_task_a(
     num_actions = game.num_distinct_actions()
 
     opponent_policy = policy_lib.UniformRandomPolicy(game)
-
     PPO_AGENT_HIDDEN_SIZE = 256
-    NUM_AGENTS = 1000
     layer_init = make_diverse_random_kuhn_poker_layer_init(game)
-    ppo_agents = [PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE) for i in range(NUM_AGENTS)]
 
     if encoder_type == 'weight_autoencoder':
-        # Extract weights from all agents for training the autoencoder
-        print("\nExtracting weights from agents...")
-        weight_vectors = []
-        for agent in tqdm(ppo_agents):
-            parameters = [param.detach() for param in agent.actor.parameters()]
-            parameters = nn.utils.parameters_to_vector(parameters)
-            weight_vectors.append(parameters)
-        weight_tensor = torch.stack(weight_vectors)
-        print(f"Weight tensor shape: {weight_tensor.shape}")
-
         # Train autoencoder on agent weights
+        NUM_AGENTS_AUTOENCODE = 1000
+        ppo_agents = [PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE) for i in range(NUM_AGENTS_AUTOENCODE)]
         print("\nTraining autoencoder on agent weights...")
-        input_dim = weight_tensor.shape[1]
         ae_config = AutoencoderConfig(
-            input_dim=input_dim,
             hidden_dims=(512, 256),
             bottleneck_dim=64,
             epochs=50,
@@ -69,26 +51,17 @@ def test_downstream_task_a(
             lr=1e-3,
             device=device,
         )
-        dataset = VectorDataset(weight_tensor)
-        autoencoder, ae_history = train_autoencoder(dataset, ae_config)
+        weight_autoencoder = WeightAutoencoder(ae_config, ppo_agents, ppo_agent_to_vector)
+        _, ae_history = weight_autoencoder.train()
         print(f"Autoencoder trained. Final train loss: {ae_history['train_loss'][-1]:.6f}, "
             f"val loss: {ae_history['val_loss'][-1]:.6f}")
-
-        # Create encoder function using the trained autoencoder
-        ae_encoder = get_encoder(autoencoder, device="cpu")
-        def encoder_fn(ppo_agent: PPOAgent):
-            """Extract weights from first layer and encode using autoencoder."""
-            parameters = [param.detach() for param in ppo_agent.actor.parameters()]
-            parameters = nn.utils.parameters_to_vector(parameters)
-            return ae_encoder(parameters)
+        encoder_fn = weight_autoencoder.get_encoder(device=device)
+    elif encoder_type == 'identity':
+        encoder_fn = ppo_agent_to_vector
     else:
-        def encoder_fn(ppo_agent: PPOAgent):
-            parameters = [param.detach() for param in ppo_agent.actor.parameters()]
-            # return ppo_agent.actor[0].weight.flatten()
-            parameters = nn.utils.parameters_to_vector(parameters)
-            return parameters
+        raise ValueError(f"Invalid encoder type: {encoder_type}")
 
-    # Create and train predictor
+    # Create and train payoff predictor
     if predictor_type == "mlp":
         hidden_dims = [128, 64, 32]
     elif predictor_type == "linear":
@@ -106,8 +79,6 @@ def test_downstream_task_a(
         dropout=0.2,
         device="cpu"
     )
-
-    # Train the model
     print("\nTraining predictor model...")
     history = predictor.train(
         num_epochs=100,
@@ -117,7 +88,7 @@ def test_downstream_task_a(
         verbose=True
     )
 
-    # Evaluate on validation set
+    # Evaluate payoff predictor on validation set
     print("\nEvaluating model on validation set...")
     val_metrics = predictor.evaluate(eval_set="val")
     print(f"\nValidation Set Results:")
@@ -125,7 +96,7 @@ def test_downstream_task_a(
     print(f"MAE: {val_metrics['mae']:.6f}")
     print(f"R2: {val_metrics['r2']:.6f}")
 
-    # Evaluate on training set for comparison
+    # Evaluate payoff predictor on training set for comparison
     print("\nEvaluating model on training set...")
     train_metrics = predictor.evaluate(eval_set="train")
     print(f"\nTraining Set Results:")
@@ -133,7 +104,7 @@ def test_downstream_task_a(
     print(f"MAE: {train_metrics['mae']:.6f}")
     print(f"R2: {train_metrics['r2']:.6f}")
 
-    # Save the model
+    # Save the payoff predictor model
     results_dir = Path("results") / experiment_label
     results_dir.mkdir(parents=True, exist_ok=True)
     save_path = results_dir / f"{game_short_name}_predictor_{predictor_type}_{encoder_type}.pth"

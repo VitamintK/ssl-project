@@ -1,3 +1,4 @@
+import argparse
 import math
 from dataclasses import dataclass
 from typing import Callable, Iterable, Sequence, Union
@@ -5,7 +6,8 @@ from typing import Callable, Iterable, Sequence, Union
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader, Dataset, random_split
-
+from tqdm import tqdm
+from iig_rl_benchmark.algorithms.ppo import ppo
 
 class VectorDataset(Dataset):
     """Simple dataset wrapper for 2D weight tensors."""
@@ -22,7 +24,7 @@ class VectorDataset(Dataset):
         return self.vectors[idx]
 
 
-class WeightAutoencoder(nn.Module):
+class Autoencoder(nn.Module):
     def __init__(self, input_dim: int, hidden_dims: Sequence[int], bottleneck_dim: int):
         super().__init__()
         dims = [input_dim, *hidden_dims]
@@ -44,74 +46,145 @@ class WeightAutoencoder(nn.Module):
         z = self.encoder(x)
         return self.decoder(z)
 
-
 @dataclass
 class AutoencoderConfig:
-    input_dim: int
     hidden_dims: tuple[int, ...] = (512, 256)
     bottleneck_dim: int = 64
-    lr: float = 1e-3
+    lr: float = 3e-4
     batch_size: int = 64
-    epochs: int = 50
+    epochs: int = 15
     weight_decay: float = 0.0
     val_split: float = 0.1
     seed: int = 0
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
+class WeightAutoencoder:
+    def __init__(self, cfg: AutoencoderConfig, policies: list[any], policy_to_vector: Callable):
+        self.cfg = cfg
+        self.policies = policies
+        self.policy_to_vector = policy_to_vector
 
-def train_autoencoder(
-    vectors: Union[torch.Tensor, Dataset],
-    cfg: AutoencoderConfig,
-    callbacks: Iterable[Callable[..., None]] | None = None,
-) -> tuple[WeightAutoencoder, dict]:
-    """Train a weight autoencoder and return both the model and its loss history.
+    def train(self, callbacks: Iterable[Callable[..., None]] | None = None):
+        """Train a weight autoencoder and return both the model and its loss history.
+        Raises:
+            TypeError: If `vectors` is neither a Tensor nor a Dataset.
+            ValueError: If the validation split is invalid or the dataset is too small.
+        """
+        cfg = self.cfg
+        vectors = [self.policy_to_vector(policy) for policy in self.policies]
+        vectors = torch.stack(vectors)
+        input_dim = vectors.shape[1]
+        vectors = VectorDataset(vectors)
+        torch.manual_seed(cfg.seed)
 
-    Raises:
-        TypeError: If `vectors` is neither a Tensor nor a Dataset.
-        ValueError: If the validation split is invalid or the dataset is too small.
-    """
-    torch.manual_seed(cfg.seed)
+        train_len, val_len = _split_lengths(len(vectors), cfg.val_split)
+        train_ds, val_ds = random_split(vectors, [train_len, val_len])
 
-    train_len, val_len = _split_lengths(len(vectors), cfg.val_split)
-    train_ds, val_ds = random_split(vectors, [train_len, val_len])
+        pin_memory = cfg.device.startswith("cuda")
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=cfg.batch_size,
+            shuffle=True,
+            drop_last=False,
+            pin_memory=pin_memory,
+        )
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=cfg.batch_size,
+            shuffle=False,
+            drop_last=False,
+            pin_memory=pin_memory,
+        )
 
-    pin_memory = cfg.device.startswith("cuda")
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=cfg.batch_size,
-        shuffle=True,
-        drop_last=False,
-        pin_memory=pin_memory,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=cfg.batch_size,
-        shuffle=False,
-        drop_last=False,
-        pin_memory=pin_memory,
-    )
+        self.autoencoder = Autoencoder(input_dim, cfg.hidden_dims, cfg.bottleneck_dim).to(cfg.device)
+        optimizer = optim.AdamW(self.autoencoder.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+        criterion = nn.MSELoss()
 
-    model = WeightAutoencoder(cfg.input_dim, cfg.hidden_dims, cfg.bottleneck_dim).to(cfg.device)
-    optimizer = optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
-    criterion = nn.MSELoss()
+        history = {"train_loss": [], "val_loss": []}
+        callback_list = list(callbacks or [])
 
-    history = {"train_loss": [], "val_loss": []}
-    callback_list = list(callbacks or [])
+        progress_bar = tqdm(range(1, cfg.epochs + 1), desc="Training Autoencoder")
+        for epoch in progress_bar:
+            train_loss = self._run_epoch(self.autoencoder, train_loader, criterion, cfg.device, optimizer)
+            val_loss = self._run_epoch(self.autoencoder, val_loader, criterion, cfg.device, None)
 
-    for epoch in range(cfg.epochs):
-        train_loss = _run_epoch(model, train_loader, criterion, cfg.device, optimizer)
-        val_loss = _run_epoch(model, val_loader, criterion, cfg.device, None)
+            history["train_loss"].append(train_loss)
+            history["val_loss"].append(val_loss)
+            progress_bar.set_postfix(
+                train_loss=f"{train_loss:.4f}", val_loss=f"{val_loss:.4f}"
+            )
+            for cb in callback_list:
+                cb(epoch=epoch, model=self.autoencoder, train_loss=train_loss, val_loss=val_loss)
 
-        history["train_loss"].append(train_loss)
-        history["val_loss"].append(val_loss)
+        return self.autoencoder, history
+    
+    def _run_epoch(
+        self,
+        model: nn.Module,
+        loader: DataLoader,
+        criterion: nn.Module,
+        device: str,
+        optimizer: optim.Optimizer | None,
+    ) -> float:
+        if optimizer is None:
+            model.eval()
+            context = torch.no_grad()
+        else:
+            model.train()
+            context = torch.enable_grad()
 
-        for cb in callback_list:
-            cb(epoch=epoch, model=model, train_loss=train_loss, val_loss=val_loss)
+        total_loss = 0.0
+        total_items = 0
 
-    return model, history
+        with context:
+            for batch in loader:
+                batch = batch.to(device)
 
+                if optimizer is not None:
+                    optimizer.zero_grad()
 
+                recon = model(batch)
+                loss = criterion(recon, batch)
 
+                if optimizer is not None:
+                    loss.backward()
+                    optimizer.step()
+
+                total_loss += loss.item() * batch.size(0)
+                total_items += batch.size(0)
+        return total_loss / total_items
+
+    def get_encoder(self, device: str = "cpu") -> callable:
+        """
+        Get the encoder part of a trained autoencoder as a callable function.
+
+        Args:
+            autoencoder: Trained WeightAutoencoder model
+            device: Device to run the encoder on
+
+        Returns:
+            encoder_fn: Function that takes a weight vector and returns its bottleneck embedding
+        """
+        self.autoencoder.eval()
+        self.autoencoder.to(device)
+
+        def encoder_fn(policy: any) -> torch.Tensor:
+            """Encode weights into bottleneck representation."""
+            with torch.no_grad():
+                vector = self.policy_to_vector(policy)
+                if not isinstance(vector, torch.Tensor):
+                    params = torch.tensor(params)
+                vector = vector.float().to(device)
+                if vector.ndim == 1:
+                    vector = vector.unsqueeze(0)
+                embedding = self.autoencoder.encoder(vector)
+                return embedding.squeeze(0)
+        return encoder_fn
+
+def ppo_agent_to_vector(ppo_agent: ppo.PPOAgent) -> torch.Tensor:
+    parameters = [param.detach() for param in ppo_agent.actor.parameters()]
+    parameters = nn.utils.parameters_to_vector(parameters)
+    return parameters
 
 def _split_lengths(total_len: int, val_split: float) -> tuple[int, int]:
 
@@ -123,78 +196,72 @@ def _split_lengths(total_len: int, val_split: float) -> tuple[int, int]:
 
     return train_len, val_len
 
+def _parse_args() -> argparse.Namespace:
+    def hidden_dims_arg(value: str) -> tuple[int, ...]:
+        dims = [int(v.strip()) for v in value.split(",") if v.strip()]
+        if not dims:
+            raise argparse.ArgumentTypeError("hidden dims must not be empty")
+        return tuple(dims)
 
-def _run_epoch(
-    model: WeightAutoencoder,
-    loader: DataLoader,
-    criterion: nn.Module,
-    device: str,
-    optimizer: optim.Optimizer | None,
-) -> float:
-    if optimizer is None:
-        model.eval()
-        context = torch.no_grad()
-    else:
-        model.train()
-        context = torch.enable_grad()
-
-    total_loss = 0.0
-    total_items = 0
-
-    with context:
-        for batch in loader:
-            batch = batch.to(device)
-
-            if optimizer is not None:
-                optimizer.zero_grad()
-
-            recon = model(batch)
-            loss = criterion(recon, batch)
-
-            if optimizer is not None:
-                loss.backward()
-                optimizer.step()
-
-            total_loss += loss.item() * batch.size(0)
-            total_items += batch.size(0)
-
-    return total_loss / total_items
-
-
-def get_encoder(autoencoder: WeightAutoencoder, device: str = "cpu") -> callable:
-    """
-    Get the encoder part of a trained autoencoder as a callable function.
-
-    Args:
-        autoencoder: Trained WeightAutoencoder model
-        device: Device to run the encoder on
-
-    Returns:
-        encoder_fn: Function that takes a weight vector and returns its bottleneck embedding
-    """
-    autoencoder.eval()
-    autoencoder.to(device)
-
-    def encoder_fn(weights: torch.Tensor) -> torch.Tensor:
-        """Encode weights into bottleneck representation."""
-        with torch.no_grad():
-            if not isinstance(weights, torch.Tensor):
-                weights = torch.tensor(weights)
-            weights = weights.float().to(device)
-            if weights.ndim == 1:
-                weights = weights.unsqueeze(0)
-            embedding = autoencoder.encoder(weights)
-            return embedding.squeeze(0)
-
-    return encoder_fn
-
+    parser = argparse.ArgumentParser(description="Encode random PPO agents for weight autoencoding.")
+    parser.add_argument("--num-agents", type=int, default=1000, help="Number of random PPO agents to encode.")
+    parser.add_argument("--seed", type=int, default=None, help="Optional random seed.")
+    parser.add_argument("--device", type=str, default="cpu", help="Torch device for agent instantiation.")
+    parser.add_argument("--game", type=str, default="kuhn_poker", help="OpenSpiel game name.")
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Optional path to save the stacked weight vectors as a .pt file.",
+    )
+    parser.add_argument(
+        "--autoencoder-output",
+        type=str,
+        default='checkpoints/',
+        help="Optional checkpoint path for the trained autoencoder.",
+    )
+    parser.add_argument("--hidden-dims", type=hidden_dims_arg, default=(64, 64), help="Comma separated hidden dims.")
+    parser.add_argument("--bottleneck-dim", type=int, default=64, help="Autoencoder latent dimension size.")
+    parser.add_argument("--epochs", type=int, default=20, help="Training epochs for the autoencoder.")
+    parser.add_argument("--batch-size", type=int, default=16, help="Autoencoder training batch size.")
+    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate for autoencoder training.")
+    parser.add_argument("--weight-decay", type=float, default=0.0, help="Weight decay for optimizer.")
+    parser.add_argument("--val-split", type=float, default=0.1, help="Validation split proportion.")
+    return parser.parse_args()
 
 if __name__ == "__main__":
-    print("Training Weight Autoencoder on synthetic data...")
-    dim, samples = 1024, 10_000
-    synthetic_vectors = torch.randn(samples, dim)
+    import numpy as np
+    import utils
+    import pyspiel
+    from utils import make_diverse_random_kuhn_poker_layer_init
+    from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
 
-    cfg = AutoencoderConfig(input_dim=dim, bottleneck_dim=32, hidden_dims=(256, 128), epochs=10)
-    model, hist = train_autoencoder(synthetic_vectors, cfg)
+    args = _parse_args()
 
-    print(hist["train_loss"][-1], hist["val_loss"][-1])
+    game = pyspiel.load_game(args.game)
+    game_short_name = game.get_type().short_name
+    info_state_size = game.information_state_tensor_shape()
+    num_actions = game.num_distinct_actions()
+
+    PPO_AGENT_HIDDEN_SIZE = 256
+    layer_init = make_diverse_random_kuhn_poker_layer_init(game)
+
+    # Train autoencoder on agent weights
+    ppo_agents = [PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE) for i in range(args.num_agents)]
+    print("\nTraining autoencoder on agent weights...")
+    ae_config = AutoencoderConfig(
+        hidden_dims=args.hidden_dims,
+        bottleneck_dim=args.bottleneck_dim,
+        lr=args.lr,
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        weight_decay=args.weight_decay,
+        val_split=args.val_split,
+        seed=args.seed if args.seed is not None else 0,
+        device=args.device,
+    )
+    weight_autoencoder = WeightAutoencoder(ae_config, ppo_agents, ppo_agent_to_vector)
+    _, ae_history = weight_autoencoder.train()
+    final_train = ae_history["train_loss"][-1]
+    final_val = ae_history["val_loss"][-1]
+    print(f"Trained autoencoder. Final train loss: {final_train:.6f}, val loss: {final_val:.6f}")
