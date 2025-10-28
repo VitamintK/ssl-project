@@ -205,6 +205,7 @@ def _parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description="Encode random PPO agents for weight autoencoding.")
     parser.add_argument("--num-agents", type=int, default=1000, help="Number of random PPO agents to encode.")
+    parser.add_argument("--ppo-agent-hidden-size", type=int, default=256, help="Hidden size for the PPO agent.")
     parser.add_argument("--seed", type=int, default=None, help="Optional random seed.")
     parser.add_argument("--device", type=str, default="cpu", help="Torch device for agent instantiation.")
     parser.add_argument("--game", type=str, default="kuhn_poker", help="OpenSpiel game name.")
@@ -243,11 +244,10 @@ if __name__ == "__main__":
     info_state_size = game.information_state_tensor_shape()
     num_actions = game.num_distinct_actions()
 
-    PPO_AGENT_HIDDEN_SIZE = 256
     layer_init = make_diverse_random_kuhn_poker_layer_init(game)
 
     # Train autoencoder on agent weights
-    ppo_agents = [PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE) for i in range(args.num_agents)]
+    ppo_agents = [PPOAgent(num_actions, info_state_size, 'cpu', layer_init, args.ppo_agent_hidden_size) for i in range(args.num_agents)]
     print("\nTraining autoencoder on agent weights...")
     ae_config = AutoencoderConfig(
         hidden_dims=args.hidden_dims,
