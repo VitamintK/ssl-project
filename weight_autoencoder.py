@@ -6,6 +6,7 @@ from typing import Any, Callable, Iterable, Sequence, Union
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader, Dataset, random_split
+from tqdm import tqdm
 
 
 class VectorDataset(Dataset):
@@ -115,12 +116,17 @@ def train_autoencoder(
     history = {"train_loss": [], "val_loss": []}
     callback_list = list(callbacks or [])
 
-    for epoch in range(cfg.epochs):
+    progress_bar = tqdm(range(1, cfg.epochs + 1), desc="Training Autoencoder")
+    for epoch in progress_bar:
         train_loss = _run_epoch(model, train_loader, criterion, cfg.device, optimizer)
         val_loss = _run_epoch(model, val_loader, criterion, cfg.device, None)
 
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
+
+        progress_bar.set_postfix(
+            train_loss=f"{train_loss:.4f}", val_loss=f"{val_loss:.4f}"
+        )
 
         for cb in callback_list:
             cb(epoch=epoch, model=model, train_loss=train_loss, val_loss=val_loss)
