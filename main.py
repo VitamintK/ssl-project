@@ -1,7 +1,6 @@
 from typing import Literal
 import pyspiel
 import torch
-from torch import nn
 from pathlib import Path
 
 from open_spiel.python import policy as policy_lib

@@ -157,23 +157,19 @@ class WeightAutoencoder:
     def get_encoder(self, device: str = "cpu") -> callable:
         """
         Get the encoder part of a trained autoencoder as a callable function.
-
         Args:
-            autoencoder: Trained WeightAutoencoder model
             device: Device to run the encoder on
-
         Returns:
             encoder_fn: Function that takes a weight vector and returns its bottleneck embedding
         """
         self.autoencoder.eval()
         self.autoencoder.to(device)
-
         def encoder_fn(policy: any) -> torch.Tensor:
             """Encode weights into bottleneck representation."""
             with torch.no_grad():
                 vector = self.policy_to_vector(policy)
                 if not isinstance(vector, torch.Tensor):
-                    params = torch.tensor(params)
+                    vector = torch.tensor(vector)
                 vector = vector.float().to(device)
                 if vector.ndim == 1:
                     vector = vector.unsqueeze(0)
@@ -231,20 +227,17 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 if __name__ == "__main__":
-    import numpy as np
-    import utils
     import pyspiel
-    from utils import make_diverse_random_kuhn_poker_layer_init
+    from utils import make_diverse_random_kuhn_poker_layer_init, get_device_string
     from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
 
     args = _parse_args()
 
     if (device := args.device) is None:
-        device = utils.get_device_string()
+        device = get_device_string()
     print(f"Using device: {device}")
     
     game = pyspiel.load_game(args.game)
-    game_short_name = game.get_type().short_name
     info_state_size = game.information_state_tensor_shape()
     num_actions = game.num_distinct_actions()
 
