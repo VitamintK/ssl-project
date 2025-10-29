@@ -5,6 +5,14 @@ import pyspiel
 from open_spiel.python import policy
 from open_spiel.python.algorithms.psro_v2.abstract_meta_trainer import sample_episode
 
+def get_device_string():
+    if torch.cuda.is_available():
+        return 'cude'
+    elif torch.backends.mps.is_available():
+        return 'mps'
+    else:
+        return 'cpu'
+
 class PPOAgentPolicy(policy.Policy):
     def __init__(self, game, ppo_agent, player_id: int,
                     use_observation: bool):
