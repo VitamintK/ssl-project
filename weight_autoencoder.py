@@ -198,7 +198,7 @@ def _split_lengths(total_len: int, val_split: float) -> tuple[int, int]:
     return train_len, val_len
 
 def save_autoencoder(
-    model: WeightAutoencoder,
+    model: Autoencoder,
     cfg: AutoencoderConfig,
     path: str | Path,
 ) -> None:
@@ -212,21 +212,34 @@ def save_autoencoder(
 def load_autoencoder(
     path: str | Path,
     device: str | torch.device | None = None,
-) -> tuple[WeightAutoencoder, AutoencoderConfig]:
+) -> tuple[Autoencoder, AutoencoderConfig]:
     """Load a saved autoencoder checkpoint."""
-    checkpoint = torch.load(Path(path), map_location="cpu")
+    map_location = device or "cpu"
+    checkpoint = torch.load(Path(path), map_location=map_location)
     cfg_dict = checkpoint.get("config")
     if cfg_dict is None:
         raise ValueError("Checkpoint is missing autoencoder config metadata.")
 
     cfg = AutoencoderConfig(**cfg_dict)
 
-    model = WeightAutoencoder(cfg.input_dim, cfg.hidden_dims, cfg.bottleneck_dim)
-    model.load_state_dict(checkpoint["state_dict"])
+    state_dict = checkpoint.get("state_dict")
+    if state_dict is None:
+        raise ValueError("Checkpoint is missing state_dict.")
+
+    try:
+        input_dim = state_dict["encoder.0.weight"].shape[1]
+    except KeyError as exc:
+        raise KeyError("Unable to infer input dimension from checkpoint state_dict.") from exc
+
+    autoencoder = Autoencoder(input_dim, cfg.hidden_dims, cfg.bottleneck_dim)
+    autoencoder.load_state_dict(state_dict)
+    autoencoder.to(map_location)
+    autoencoder.eval()
+
     if device is not None:
-        model = model.to(device)
         cfg.device = str(device)
-    return model, cfg
+
+    return autoencoder, cfg
 
 def _parse_args() -> argparse.Namespace:
     def hidden_dims_arg(value: str) -> tuple[int, ...]:
