@@ -9,6 +9,9 @@ from torch.utils.data import DataLoader, Dataset, random_split
 from tqdm import tqdm
 from iig_rl_benchmark.algorithms.ppo import ppo
 
+from pathlib import Path
+from dataclasses import asdict
+
 class VectorDataset(Dataset):
     """Simple dataset wrapper for 2D weight tensors."""
 
@@ -154,6 +157,8 @@ class WeightAutoencoder:
                 total_items += batch.size(0)
         return total_loss / total_items
 
+
+
     def get_encoder(self, device: str = "cpu") -> callable:
         """
         Get the encoder part of a trained autoencoder as a callable function.
@@ -191,6 +196,37 @@ def _split_lengths(total_len: int, val_split: float) -> tuple[int, int]:
         raise ValueError("Not enough training samples; reduce val_split or increase dataset size.")
 
     return train_len, val_len
+
+def save_autoencoder(
+    model: WeightAutoencoder,
+    cfg: AutoencoderConfig,
+    path: str | Path,
+) -> None:
+    """Persist the autoencoder weights along with the config metadata."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint = {"state_dict": model.state_dict(), "config": asdict(cfg)} 
+    torch.save(checkpoint, path)
+
+
+def load_autoencoder(
+    path: str | Path,
+    device: str | torch.device | None = None,
+) -> tuple[WeightAutoencoder, AutoencoderConfig]:
+    """Load a saved autoencoder checkpoint."""
+    checkpoint = torch.load(Path(path), map_location="cpu")
+    cfg_dict = checkpoint.get("config")
+    if cfg_dict is None:
+        raise ValueError("Checkpoint is missing autoencoder config metadata.")
+
+    cfg = AutoencoderConfig(**cfg_dict)
+
+    model = WeightAutoencoder(cfg.input_dim, cfg.hidden_dims, cfg.bottleneck_dim)
+    model.load_state_dict(checkpoint["state_dict"])
+    if device is not None:
+        model = model.to(device)
+        cfg.device = str(device)
+    return model, cfg
 
 def _parse_args() -> argparse.Namespace:
     def hidden_dims_arg(value: str) -> tuple[int, ...]:

@@ -11,6 +11,7 @@ from weight_autoencoder import (
     AutoencoderConfig,
     WeightAutoencoder,
     ppo_agent_to_vector,
+    save_autoencoder,
 )
 
 def test_downstream_task_a(
@@ -51,7 +52,12 @@ def test_downstream_task_a(
             device=device,
         )
         weight_autoencoder = WeightAutoencoder(ae_config, ppo_agents, ppo_agent_to_vector)
-        _, ae_history = weight_autoencoder.train()
+        autoencoder_model, ae_history = weight_autoencoder.train()
+        save_autoencoder(
+            autoencoder_model,
+            ae_config,
+            Path("results") / experiment_label / f"{game_short_name}_autoencoder.pt",
+        )
         print(f"Autoencoder trained. Final train loss: {ae_history['train_loss'][-1]:.6f}, "
             f"val loss: {ae_history['val_loss'][-1]:.6f}")
         encoder_fn = weight_autoencoder.get_encoder(device=device)
