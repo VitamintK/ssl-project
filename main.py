@@ -8,6 +8,11 @@ from open_spiel.python import policy as policy_lib
 from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
 from utils import make_diverse_random_kuhn_poker_layer_init
 from downstream import PayoffPredictor, set_seed
+from functional_autoencoder import (
+    TrainingConfig,
+    train_functional_autoencoder,
+    FunctionalEncoderAdapter,
+)
 from weight_autoencoder import (
     AutoencoderConfig,
     WeightAutoencoder,
@@ -214,6 +219,102 @@ def test_downstream_task_load(
     return predictor, history, val_metrics, train_metrics
 
 
+def test_downstream_task_feature_encoder(
+        game: pyspiel.Game,
+        predictor_type: Literal["mlp", "linear"] = "linear",
+        experiment_label: str = "downstream_feature",
+        device: str = "cpu",
+):
+    print("\n" + "="*80)
+    print("Testing Downstream Task with Functional Feature Encoder")
+    print("="*80 + "\n")
+    """
+    Train a functional feature encoder on Kuhn Poker PPO agents and evaluate
+    the downstream payoff predictor using the learned embeddings.
+    """
+    game_short_name = game.get_type().short_name
+    info_state_size = game.information_state_tensor_shape()
+    num_actions = game.num_distinct_actions()
+    print(f"Game: {game_short_name}, Info State Size: {info_state_size}, Num Actions: {num_actions}")
+    opponent_policy = policy_lib.UniformRandomPolicy(game)
+    PPO_AGENT_HIDDEN_SIZE = 64
+    layer_init = make_diverse_random_kuhn_poker_layer_init(game)
+
+    NUM_ENCODER_AGENTS = 1000
+    feature_agents = [
+        PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE)
+        for _ in range(NUM_ENCODER_AGENTS)
+    ]
+    feature_cfg = TrainingConfig(
+        num_agents=NUM_ENCODER_AGENTS,
+        ppo_hidden_size=PPO_AGENT_HIDDEN_SIZE,
+        epochs=10,
+        batch_size=32,
+        lr=3e-4,
+        device=device,
+    )
+    print("\nTraining functional feature encoder...")
+    feature_model, feature_history = train_functional_autoencoder(
+        feature_cfg,
+        game=game,
+        agents=feature_agents,
+    )
+    print(f"Feature encoder trained. Final KL: {feature_history[-1]:.6f}")
+    weight_autoencoder = FunctionalEncoderAdapter(feature_model)
+    encoder_fn = weight_autoencoder.get_encoder(device=device)
+
+    if predictor_type == "mlp":
+        hidden_dims = [128, 64, 32]
+    elif predictor_type == "linear":
+        hidden_dims = []
+    else:
+        raise ValueError(f"Invalid predictor type: {predictor_type}")
+
+    NUM_PREDICTOR_AGENTS = 1000
+    predictor_agents = [
+        PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE)
+        for _ in range(NUM_PREDICTOR_AGENTS)
+    ]
+    predictor = PayoffPredictor(
+        game=game,
+        ppo_agents=predictor_agents,
+        opponent_policy=opponent_policy,
+        encoder_fn=encoder_fn,
+        hidden_dims=hidden_dims,
+        dropout=0.2,
+        device="cpu"
+    )
+
+    print("\nTraining payoff predictor with feature encoder...")
+    history = predictor.train(
+        num_epochs=100,
+        batch_size=16,
+        learning_rate=1e-4,
+        validation_split=0.2,
+        verbose=True
+    )
+
+    print("\nEvaluating feature-encoder model on validation set...")
+    val_metrics = predictor.evaluate(eval_set="val")
+    print(f"\nValidation Set Results (feature encoder):")
+    print(f"MSE: {val_metrics['mse']:.6f}")
+    print(f"MAE: {val_metrics['mae']:.6f}")
+    print(f"R2: {val_metrics['r2']:.6f}")
+
+    print("\nEvaluating feature-encoder model on training set...")
+    train_metrics = predictor.evaluate(eval_set="train")
+    print(f"\nTraining Set Results (feature encoder):")
+    print(f"MSE: {train_metrics['mse']:.6f}")
+    print(f"MAE: {train_metrics['mae']:.6f}")
+    print(f"R2: {train_metrics['r2']:.6f}")
+
+    results_dir = Path("results") / experiment_label
+    results_dir.mkdir(parents=True, exist_ok=True)
+    predictor.save(str(results_dir / f"{game_short_name}_predictor_{predictor_type}_feature.pth"))
+
+    return predictor, history, val_metrics, train_metrics, feature_history
+
+
 if __name__ == "__main__":
     if torch.cuda.is_available():
         device = "cuda"
@@ -233,17 +334,20 @@ if __name__ == "__main__":
         device=device,
     )
 
-    set_seed(42)
-    test_downstream_task_load(
+    # set_seed(42)
+    # test_downstream_task_load(
+    #     game,
+    #     predictor_type="linear",
+    #     experiment_label="downstream_a",
+    #     device=device,
+    #     expected_val_metrics=baseline_val_metrics,
+    #     expected_train_metrics=baseline_train_metrics,
+    # )
+
+
+    test_downstream_task_feature_encoder(
         game,
         predictor_type="linear",
-        experiment_label="downstream_a",
+        experiment_label="downstream_feature",
         device=device,
-        expected_val_metrics=baseline_val_metrics,
-        expected_train_metrics=baseline_train_metrics,
     )
-
-    game = pyspiel.load_game("kuhn_poker")
-    test_downstream_task_a(game, predictor_type="linear", encoder_type="identity", device=device)
-    # game = pyspiel.load_game("leduc_poker")
-    # test_downstream_task_a(game, device=device)
