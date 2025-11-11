@@ -26,6 +26,15 @@ def set_seed(seed=42):
     torch.cuda.manual_seed_all(seed)
 
 
+def get_state_tensor(state):
+    """
+    Concatenate both player's info for full state representation.
+    """
+    state_tensor_p0 = state.information_state_tensor(0)
+    state_tensor_p1 = state.information_state_tensor(1)
+    return state_tensor_p0 + state_tensor_p1
+
+
 def sample_random_states(game, num_states: int, max_depth: int = 10):
     """
     Sample random game states by doing random rollouts.
@@ -53,7 +62,8 @@ def sample_random_states(game, num_states: int, max_depth: int = 10):
                 break
             if state.is_chance_node():
                 outcomes = state.chance_outcomes()
-                action = random.choice([o[0] for o in outcomes])
+                actions, probs = zip(*outcomes)
+                action = random.choices(actions, weights=probs)[0]
             else:
                 legal_actions = state.legal_actions()
                 action = random.choice(legal_actions)
@@ -192,8 +202,7 @@ class PayoffPredictor:
         batch_size: int = 32,
         learning_rate: float = 1e-3,
         validation_split: float = 0.2,
-        verbose: bool = True,
-        seed: int = 42
+        verbose: bool = True
     ):
         """
         Train the payoff predictor model.
@@ -467,7 +476,7 @@ class StatePayoffPredictor(PayoffPredictor):
         self.state_sampler = state_sampler
         self.num_states_per_pair = num_states_per_pair
         self.states = None
-        self.state_embeddings = None
+        self.state_tensors = None
 
         # Override the embedding_dim calculation after encoding states
         super().__init__(
@@ -485,15 +494,15 @@ class StatePayoffPredictor(PayoffPredictor):
         self.states = state_sampler(game, num_states_per_pair)
 
         print("Encoding states...")
-        self.state_embeddings = []
+        self.state_tensors = []
         for state in tqdm(self.states):
             # Use state tensor as embedding
-            state_tensor = torch.FloatTensor(state.information_state_tensor(0))
-            self.state_embeddings.append(state_tensor.numpy())
-        self.state_embeddings = np.array(self.state_embeddings)
+            state_tensor = torch.FloatTensor(get_state_tensor(state))
+            self.state_tensors.append(state_tensor.numpy())
+        self.state_tensors = np.array(self.state_tensors)
 
         # Update embedding dimension to include state
-        state_dim = self.state_embeddings.shape[1]
+        state_dim = self.state_tensors.shape[1]
         agent_embedding_dim = self.p1_embeddings.shape[1]
         self.embedding_dim = agent_embedding_dim * 2 + state_dim
 
@@ -581,7 +590,7 @@ class StatePayoffPredictor(PayoffPredictor):
         for p1_idx, p2_idx, state_idx in self.triple_indices:
             p1_emb = self.p1_embeddings[p1_idx]
             p2_emb = self.p2_embeddings[p2_idx]
-            state_emb = self.state_embeddings[state_idx]
+            state_emb = self.state_tensors[state_idx]
             concat_emb = np.concatenate([p1_emb, p2_emb, state_emb])
             embeddings.append(concat_emb)
         embeddings = np.array(embeddings)
@@ -703,8 +712,8 @@ class StatePayoffPredictor(PayoffPredictor):
             if isinstance(p2_embedding, torch.Tensor):
                 p2_embedding = p2_embedding.detach().cpu().numpy()
 
-            # Encode state
-            state_tensor = torch.FloatTensor(state.information_state_tensor(0))
+            # Encode state (both players' perspectives)
+            state_tensor = torch.FloatTensor(get_state_tensor(state))
             state_embedding = state_tensor.numpy()
 
             # Concatenate embeddings
