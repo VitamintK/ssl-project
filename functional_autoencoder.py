@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Callable
+from typing import Iterable, Callable
 
 import torch
 from torch import nn
@@ -17,7 +17,13 @@ from open_spiel.python.algorithms import get_all_states
 
 from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
 from utils import make_diverse_random_kuhn_poker_layer_init, get_device_string
-from weight_autoencoder import Autoencoder, ppo_agent_to_vector
+from weight_autoencoder import (
+    Autoencoder,
+    AutoencoderConfig,
+    ppo_agent_to_vector,
+    save_autoencoder,
+    load_autoencoder,
+)
 
 
 def _state_tensor(state: pyspiel.State, player_id: int) -> torch.Tensor:
@@ -105,30 +111,15 @@ class PolicyBehaviorDataset(Dataset):
         }
 
 
-class FunctionalAutoencoder(Autoencoder):
-    """Autoencoder over policy weights whose reconstructions are trained via action KL."""
-
-    def __init__(
-        self,
-        weight_dim: int,
-        hidden_dims: tuple[int, ...] = (512, 256),
-        latent_dim: int = 128,
-    ):
-        super().__init__(weight_dim, hidden_dims, latent_dim)
-        self.weight_dim = weight_dim
-        self.hidden_dims = hidden_dims
-        self.latent_dim = latent_dim
-        self.weight_encoder = self.encoder
-
-
 @dataclass
 class TrainingConfig:
     num_agents: int = 8
     ppo_hidden_size: int = 256
-    epochs: int = 5
-    batch_size: int = 16
-    lr: float = 3e-4
-    device: str = get_device_string()
+    autoencoder: AutoencoderConfig = field(default_factory=AutoencoderConfig)
+
+    @property
+    def device(self) -> str:
+        return self.autoencoder.device
 
 
 def masked_kl_divergence(
@@ -142,6 +133,7 @@ def masked_kl_divergence(
     log_safe_targets = torch.log(safe_targets.clamp_min(1e-8))
 
     loss = (safe_targets * (log_safe_targets - log_probs)).sum(dim=-1)
+
     return loss.mean()
 
 
@@ -187,7 +179,7 @@ def train_functional_autoencoder(
     game: pyspiel.Game | None = None,
     agents: list[PPOAgent] | None = None,
     decision_states: list[pyspiel.State] | None = None,
-) -> tuple[FunctionalAutoencoder, list[float]]:
+) -> tuple[Autoencoder, list[float]]:
     """Train a functional autoencoder and return the model plus epoch losses."""
     game = game or pyspiel.load_game("kuhn_poker")
     info_state_shape = game.information_state_tensor_shape()
@@ -198,17 +190,18 @@ def train_functional_autoencoder(
     dataset = PolicyBehaviorDataset(agents, decision_states, num_actions, "cpu")
 
     weight_dim = dataset.weights.size(1)
-    model = FunctionalAutoencoder(weight_dim).to(cfg.device)
+    ae_cfg = cfg.autoencoder
+    model = Autoencoder(weight_dim, ae_cfg.hidden_dims, ae_cfg.bottleneck_dim).to(cfg.device)
     actor_template = PPOAgent(
         num_actions, info_state_shape, cfg.device, hidden_size=cfg.ppo_hidden_size
     ).actor.to(cfg.device)
     param_specs = _actor_param_specs(actor_template)
 
-    loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True)
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
+    loader = DataLoader(dataset, batch_size=ae_cfg.batch_size, shuffle=True)
+    optimizer = torch.optim.Adam(model.parameters(), lr=ae_cfg.lr, weight_decay=ae_cfg.weight_decay)
     epoch_losses: list[float] = []
 
-    for epoch in range(1, cfg.epochs + 1):
+    for epoch in range(1, ae_cfg.epochs + 1):
         total_loss = 0.0
         for batch in loader:
             weights = batch["weights"].to(cfg.device)
@@ -233,72 +226,28 @@ def train_functional_autoencoder(
 
 
 def save_functional_autoencoder(
-    model: FunctionalAutoencoder,
+    model: Autoencoder,
+    cfg: AutoencoderConfig,
     path: str | Path,
-    training_cfg: TrainingConfig | None = None,
-    metadata: dict[str, Any] | None = None,
 ) -> None:
-    """Persist model weights, architectural hyperparameters, and optional metadata."""
-    if not isinstance(model, FunctionalAutoencoder):
-        raise TypeError("model must be an instance of FunctionalAutoencoder.")
-
-    checkpoint_path = Path(path)
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-
-    model_config = {
-        "weight_dim": model.weight_dim,
-        "hidden_dims": model.hidden_dims,
-        "latent_dim": model.latent_dim,
-    }
-
-    checkpoint: dict[str, Any] = {
-        "state_dict": model.state_dict(),
-        "model_config": model_config,
-    }
-
-    if training_cfg is not None:
-        checkpoint["training_config"] = asdict(training_cfg)
-    if metadata is not None:
-        checkpoint["metadata"] = metadata
-
-    torch.save(checkpoint, checkpoint_path)
+    """Thin wrapper that reuses the standard autoencoder checkpoint code."""
+    save_autoencoder(model, cfg, path)
 
 
 def load_functional_autoencoder(
     path: str | Path,
     device: str | torch.device | None = None,
-) -> tuple[FunctionalAutoencoder, TrainingConfig | None, dict[str, Any] | None]:
-    """Load a functional autoencoder checkpoint and return model plus optional metadata."""
-    map_location = device or "cpu"
-    checkpoint = torch.load(Path(path), map_location=map_location)
-
-    model_config = checkpoint.get("model_config")
-    if model_config is None:
-        raise ValueError("Checkpoint missing model_config for FunctionalAutoencoder.")
-
-    state_dict = checkpoint.get("state_dict")
-    if state_dict is None:
-        raise ValueError("Checkpoint missing state_dict.")
-
-    model = FunctionalAutoencoder(**model_config)
-    model.load_state_dict(state_dict)
-    model.to(map_location)
-    model.eval()
-
-    training_cfg_dict = checkpoint.get("training_config")
-    training_cfg = TrainingConfig(**training_cfg_dict) if training_cfg_dict else None
-
-    metadata = checkpoint.get("metadata")
-
-    return model, training_cfg, metadata
+) -> tuple[Autoencoder, AutoencoderConfig]:
+    """Mirror the weight autoencoder loader for API symmetry."""
+    return load_autoencoder(path, device)
 
 
 class FunctionalEncoderAdapter:
-    """Expose the functional autoencoder's weight encoder via a simple API."""
+    """Expose the autoencoder's weight encoder via a simple API."""
 
     def __init__(
         self,
-        model: FunctionalAutoencoder,
+        model: Autoencoder,
         policy_to_vector: Callable[[PPOAgent], torch.Tensor] = ppo_agent_to_vector,
     ) -> None:
         self.model = model
@@ -306,7 +255,7 @@ class FunctionalEncoderAdapter:
 
     def get_encoder(self, device: str = "cpu") -> Callable[[PPOAgent], torch.Tensor]:
         self.model.eval()
-        weight_encoder = self.model.weight_encoder.to(device)
+        weight_encoder = self.model.encoder.to(device)
 
         def encoder_fn(policy: PPOAgent) -> torch.Tensor:
             with torch.no_grad():
@@ -322,6 +271,13 @@ class FunctionalEncoderAdapter:
         return encoder_fn
 
 
+# def _hidden_dims_arg(value: str) -> tuple[int, ...]:
+#     dims = [int(v.strip()) for v in value.split(",") if v.strip()]
+#     if not dims:
+#         raise argparse.ArgumentTypeError("hidden dims must not be empty")
+#     return tuple(dims)
+
+
 def parse_args() -> TrainingConfig:
     parser = argparse.ArgumentParser(description="Train functional autoencoder.")
     parser.add_argument("--num-agents", type=int, default=8)
@@ -329,23 +285,27 @@ def parse_args() -> TrainingConfig:
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--hidden-dims", type=_hidden_dims_arg, default=(512, 256))
+    parser.add_argument("--bottleneck-dim", type=int, default=128)
+    parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
 
-    if torch.cuda.is_available():
-        device = "cuda"
-    elif torch.backends.mps.is_available():
-        device = "mps"
-    else:
-        device = "cpu"
+    device = args.device or get_device_string()
     print("Using device:", device)
+
+    auto_cfg = AutoencoderConfig(
+        hidden_dims=args.hidden_dims,
+        bottleneck_dim=args.bottleneck_dim,
+        lr=args.lr,
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        device=device,
+    )
 
     return TrainingConfig(
         num_agents=args.num_agents,
         ppo_hidden_size=args.ppo_hidden_size,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        lr=args.lr,
-        device=device,
+        autoencoder=auto_cfg,
     )
 
 
