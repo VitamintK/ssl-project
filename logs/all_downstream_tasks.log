@@ -1,0 +1,15 @@
+Running experiment: a psro kuhn_poker linear weight_autoencoder
+Autoencoder trained. Final train loss: 0.006328, val loss: 0.007943
+MSE: 0.019804
+Running experiment: a psro kuhn_poker linear identity
+MSE: 0.068854
+Running experiment: a random kuhn_poker linear weight_autoencoder
+Autoencoder trained. Final train loss: 0.015920, val loss: 0.018973
+MSE: 0.080882
+Running experiment: a random kuhn_poker linear identity
+MSE: 0.091313
+Running experiment: a random leduc_poker linear weight_autoencoder
+Autoencoder trained. Final train loss: 0.015180, val loss: 0.019065
+MSE: 0.401486
+Running experiment: a random leduc_poker linear identity
+MSE: 0.391138

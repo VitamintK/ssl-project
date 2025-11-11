@@ -1,11 +1,14 @@
-from typing import Literal
+import random
+from typing import Literal, Optional
 import pyspiel
 import torch
 from pathlib import Path
+import logging
 
 from open_spiel.python import policy as policy_lib
 from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
-from utils import make_diverse_random_kuhn_poker_layer_init
+from psro import load_ppo_agents_from_psro
+from utils import get_device_string, make_diverse_random_kuhn_poker_layer_init
 from downstream import PayoffPredictor, set_seed
 from weight_autoencoder import (
     AutoencoderConfig,
@@ -13,10 +16,22 @@ from weight_autoencoder import (
     ppo_agent_to_vector,
 )
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+Path("logs").mkdir(parents=True, exist_ok=True)
+handler = logging.FileHandler('logs/all_downstream_tasks.log', mode='w')
+handler.setFormatter(logging.Formatter('%(message)s'))
+logger.addHandler(handler)
+handler = logging.StreamHandler()
+handler.setFormatter(logging.Formatter('%(message)s'))
+logger.addHandler(handler)
+
 def test_downstream_task_a(
         game: pyspiel.Game,
         predictor_type: Literal["mlp", "linear"],
         encoder_type: Literal["identity", "weight_autoencoder"],
+        autoencoder_ppo_agents: Optional[list[PPOAgent]] = None,
+        downstream_task_ppo_agents: Optional[list[PPOAgent]] = None,
         experiment_label: str = "downstream_a",
         device: str = "cpu",
 ):
@@ -40,7 +55,8 @@ def test_downstream_task_a(
     if encoder_type == 'weight_autoencoder':
         # Train autoencoder on agent weights
         NUM_AGENTS_AUTOENCODE = 1000
-        ppo_agents = [PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE) for i in range(NUM_AGENTS_AUTOENCODE)]
+        if autoencoder_ppo_agents is None:
+            autoencoder_ppo_agents = [PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE) for i in range(NUM_AGENTS_AUTOENCODE)]
         print("\nTraining autoencoder on agent weights...")
         ae_config = AutoencoderConfig(
             hidden_dims=(512, 256),
@@ -50,9 +66,9 @@ def test_downstream_task_a(
             lr=1e-3,
             device=device,
         )
-        weight_autoencoder = WeightAutoencoder(ae_config, ppo_agents, ppo_agent_to_vector)
+        weight_autoencoder = WeightAutoencoder(ae_config, autoencoder_ppo_agents, ppo_agent_to_vector)
         _, ae_history = weight_autoencoder.train()
-        print(f"Autoencoder trained. Final train loss: {ae_history['train_loss'][-1]:.6f}, "
+        logger.info(f"Autoencoder trained. Final train loss: {ae_history['train_loss'][-1]:.6f}, "
             f"val loss: {ae_history['val_loss'][-1]:.6f}")
         encoder_fn = weight_autoencoder.get_encoder(device=device)
     elif encoder_type == 'identity':
@@ -68,10 +84,11 @@ def test_downstream_task_a(
     else:
         raise ValueError(f"Invalid predictor type: {predictor_type}")
     NUM_AGENTS_2 = 1000
-    ppo_agents = [PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE) for i in range(NUM_AGENTS_2)]
+    if downstream_task_ppo_agents is None:
+        downstream_task_ppo_agents = [PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE) for i in range(NUM_AGENTS_2)]
     predictor = PayoffPredictor(
         game=game,
-        ppo_agents=ppo_agents,
+        ppo_agents=downstream_task_ppo_agents,
         opponent_policy=opponent_policy,
         encoder_fn=encoder_fn,
         hidden_dims=hidden_dims,
@@ -87,14 +104,6 @@ def test_downstream_task_a(
         verbose=True
     )
 
-    # Evaluate payoff predictor on validation set
-    print("\nEvaluating model on validation set...")
-    val_metrics = predictor.evaluate(eval_set="val")
-    print(f"\nValidation Set Results:")
-    print(f"MSE: {val_metrics['mse']:.6f}")
-    print(f"MAE: {val_metrics['mae']:.6f}")
-    print(f"R2: {val_metrics['r2']:.6f}")
-
     # Evaluate payoff predictor on training set for comparison
     print("\nEvaluating model on training set...")
     train_metrics = predictor.evaluate(eval_set="train")
@@ -102,6 +111,14 @@ def test_downstream_task_a(
     print(f"MSE: {train_metrics['mse']:.6f}")
     print(f"MAE: {train_metrics['mae']:.6f}")
     print(f"R2: {train_metrics['r2']:.6f}")
+
+    # Evaluate payoff predictor on validation set
+    print("\nEvaluating model on validation set...")
+    val_metrics = predictor.evaluate(eval_set="val")
+    print(f"\nValidation Set Results:")
+    logger.info(f"MSE: {val_metrics['mse']:.6f}")
+    print(f"MAE: {val_metrics['mae']:.6f}")
+    print(f"R2: {val_metrics['r2']:.6f}")
 
     # Save the payoff predictor model
     results_dir = Path("results") / experiment_label
@@ -112,20 +129,27 @@ def test_downstream_task_a(
 
     return predictor, history, val_metrics, train_metrics
 
-
 if __name__ == "__main__":
-    if torch.cuda.is_available():
-        device = "cuda"
-    elif torch.backends.mps.is_available():
-        device = "mps"
-    else:
-        device = "cpu"
+    device = get_device_string()
     print("Using device:", device)
-
     # set_seed(42)
-    game = pyspiel.load_game("kuhn_poker")
-    test_downstream_task_a(game, predictor_type="linear", encoder_type="weight_autoencoder", device=device)
-    game = pyspiel.load_game("kuhn_poker")
-    test_downstream_task_a(game, predictor_type="linear", encoder_type="identity", device=device)
-    # game = pyspiel.load_game("leduc_poker")
-    # test_downstream_task_a(game, device=device)
+
+    for game_name in ["kuhn_poker", "leduc_poker"]:
+        game = pyspiel.load_game(game_name)
+        if game_name == "kuhn_poker":
+            psro_ppo_agents_256 = load_ppo_agents_from_psro(hidden_size=256, shuffle=True)
+            first_half, second_half = psro_ppo_agents_256[:len(psro_ppo_agents_256)//2], psro_ppo_agents_256[len(psro_ppo_agents_256)//2:]
+            exp_label = f"Task A: psro {game_name} linear weight_autoencoder"
+            logger.info(f"Running experiment: {exp_label}")
+            test_downstream_task_a(game, predictor_type="linear", encoder_type="weight_autoencoder", autoencoder_ppo_agents=first_half, downstream_task_ppo_agents=second_half, device=device)
+            exp_label = f"a psro {game_name} linear identity"
+            logger.info(f"Running experiment: {exp_label}")
+            test_downstream_task_a(game, predictor_type="linear", encoder_type="identity", autoencoder_ppo_agents=first_half, downstream_task_ppo_agents=second_half, device=device)
+
+        exp_label = f"Task A: random {game_name} linear weight_autoencoder"
+        logger.info(f"Running experiment: {exp_label}")
+        test_downstream_task_a(game, predictor_type="linear", encoder_type="weight_autoencoder", device=device)
+
+        exp_label = f"Task A: random {game_name} linear identity"
+        logger.info(f"Running experiment: {exp_label}")
+        test_downstream_task_a(game, predictor_type="linear", encoder_type="identity", device=device)
