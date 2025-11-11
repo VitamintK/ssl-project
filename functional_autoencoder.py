@@ -17,7 +17,7 @@ from open_spiel.python.algorithms import get_all_states
 
 from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
 from utils import make_diverse_random_kuhn_poker_layer_init, get_device_string
-from weight_autoencoder import ppo_agent_to_vector
+from weight_autoencoder import Autoencoder, ppo_agent_to_vector
 
 
 def _state_tensor(state: pyspiel.State, player_id: int) -> torch.Tensor:
@@ -105,48 +105,20 @@ class PolicyBehaviorDataset(Dataset):
         }
 
 
-class FunctionalAutoencoder(nn.Module):
-    """Encodes (policy weights, state) -> latent -> reconstructed weights."""
+class FunctionalAutoencoder(Autoencoder):
+    """Autoencoder over policy weights whose reconstructions are trained via action KL."""
 
     def __init__(
         self,
         weight_dim: int,
-        state_dim: int,
+        hidden_dims: tuple[int, ...] = (512, 256),
         latent_dim: int = 128,
-        weight_hidden: int = 512,
-        state_hidden: int = 128,
-        decoder_hidden: int = 512,
     ):
-        super().__init__()
+        super().__init__(weight_dim, hidden_dims, latent_dim)
         self.weight_dim = weight_dim
-        self.state_dim = state_dim
+        self.hidden_dims = hidden_dims
         self.latent_dim = latent_dim
-        self.weight_hidden = weight_hidden
-        self.state_hidden = state_hidden
-        self.decoder_hidden = decoder_hidden
-        self.weight_encoder = nn.Sequential(
-            nn.Linear(weight_dim, weight_hidden),
-            nn.ReLU(),
-            nn.Linear(weight_hidden, latent_dim),
-            nn.ReLU(),
-        )
-        self.state_encoder = nn.Sequential(
-            nn.Linear(state_dim, state_hidden),
-            nn.ReLU(),
-            nn.Linear(state_hidden, state_hidden),
-            nn.ReLU(),
-        )
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim + state_hidden, decoder_hidden),
-            nn.ReLU(),
-            nn.Linear(decoder_hidden, weight_dim),
-        )
-
-    def forward(self, weight_vec: torch.Tensor, state_vec: torch.Tensor) -> torch.Tensor:
-        w_feat = self.weight_encoder(weight_vec)
-        s_feat = self.state_encoder(state_vec)
-        joint = torch.cat([w_feat, s_feat], dim=-1)
-        return self.decoder(joint)
+        self.weight_encoder = self.encoder
 
 
 @dataclass
@@ -226,8 +198,7 @@ def train_functional_autoencoder(
     dataset = PolicyBehaviorDataset(agents, decision_states, num_actions, "cpu")
 
     weight_dim = dataset.weights.size(1)
-    state_dim = dataset.states.size(1)
-    model = FunctionalAutoencoder(weight_dim, state_dim).to(cfg.device)
+    model = FunctionalAutoencoder(weight_dim).to(cfg.device)
     actor_template = PPOAgent(
         num_actions, info_state_shape, cfg.device, hidden_size=cfg.ppo_hidden_size
     ).actor.to(cfg.device)
@@ -246,7 +217,7 @@ def train_functional_autoencoder(
             legal_masks = batch["legal_masks"].to(cfg.device)
 
             optimizer.zero_grad()
-            recon = model(weights, states)
+            recon = model(weights)
             logits = reconstructed_logits(recon, states, actor_template, param_specs)
             loss = masked_kl_divergence(logits, probs, legal_masks)
             loss.backward()
@@ -276,11 +247,8 @@ def save_functional_autoencoder(
 
     model_config = {
         "weight_dim": model.weight_dim,
-        "state_dim": model.state_dim,
+        "hidden_dims": model.hidden_dims,
         "latent_dim": model.latent_dim,
-        "weight_hidden": model.weight_hidden,
-        "state_hidden": model.state_hidden,
-        "decoder_hidden": model.decoder_hidden,
     }
 
     checkpoint: dict[str, Any] = {

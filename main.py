@@ -240,7 +240,7 @@ def test_downstream_task_feature_encoder(
     PPO_AGENT_HIDDEN_SIZE = 64
     layer_init = make_diverse_random_kuhn_poker_layer_init(game)
 
-    NUM_ENCODER_AGENTS = 1000
+    NUM_ENCODER_AGENTS = 200
     feature_agents = [
         PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE)
         for _ in range(NUM_ENCODER_AGENTS)
@@ -327,12 +327,12 @@ if __name__ == "__main__":
     game = pyspiel.load_game("kuhn_poker")
 
     set_seed(42)
-    _, _, baseline_val_metrics, baseline_train_metrics = test_downstream_task_a(
-        game,
-        predictor_type="linear",
-        encoder_type="weight_autoencoder",
-        device=device,
-    )
+    # _, _, baseline_val_metrics, baseline_train_metrics = test_downstream_task_a(
+    #     game,
+    #     predictor_type="linear",
+    #     encoder_type="weight_autoencoder",
+    #     device=device,
+    # )
 
     # set_seed(42)
     # test_downstream_task_load(
