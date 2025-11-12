@@ -330,12 +330,12 @@ if __name__ == "__main__":
     game = pyspiel.load_game("kuhn_poker")
 
     set_seed(42)
-    # _, _, baseline_val_metrics, baseline_train_metrics = test_downstream_task_a(
-    #     game,
-    #     predictor_type="linear",
-    #     encoder_type="weight_autoencoder",
-    #     device=device,
-    # )
+    _, _, baseline_val_metrics, baseline_train_metrics = test_downstream_task_a(
+        game,
+        predictor_type="linear",
+        encoder_type="weight_autoencoder",
+        device=device,
+    )
 
     # set_seed(42)
     # test_downstream_task_load(
