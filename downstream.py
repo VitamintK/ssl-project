@@ -117,7 +117,8 @@ class PayoffPredictor:
         game,
         p1_agents: List[Any],
         p2_agents: List[Any],
-        encoder_fn: Callable,
+        p1_encoder_fn: Callable,
+        p2_encoder_fn: Callable,
         hidden_dims: List[int],
         dropout: float,
         device: str = "cpu"
@@ -129,7 +130,8 @@ class PayoffPredictor:
             game: OpenSpiel game instance
             p1_agents: List of P1 agents
             p2_agents: List of P2 agents (can be a single-element list for fixed opponent)
-            encoder_fn: Function that maps an agent to an embedding vector
+            p1_encoder_fn: Function that maps a P1 agent to an embedding vector
+            p2_encoder_fn: Function that maps a P2 agent to an embedding vector
             hidden_dims: Hidden layer dimensions for the predictor network
             dropout: Dropout rate for the predictor network
             device: cpu or cuda
@@ -137,14 +139,15 @@ class PayoffPredictor:
         self.game = game
         self.p1_agents = p1_agents
         self.p2_agents = p2_agents
-        self.encoder_fn = encoder_fn
+        self.p1_encoder_fn = p1_encoder_fn
+        self.p2_encoder_fn = p2_encoder_fn
         self.device = device
 
         # Encode P1 agents
         print("Encoding P1 agents...")
         self.p1_embeddings = []
         for agent in tqdm(p1_agents):
-            embedding = encoder_fn(agent)
+            embedding = p1_encoder_fn(agent)
             if isinstance(embedding, torch.Tensor):
                 embedding = embedding.detach().cpu().numpy()
             self.p1_embeddings.append(embedding)
@@ -154,7 +157,7 @@ class PayoffPredictor:
         print("Encoding P2 agents...")
         self.p2_embeddings = []
         for agent in tqdm(p2_agents):
-            embedding = encoder_fn(agent)
+            embedding = p2_encoder_fn(agent)
             if isinstance(embedding, torch.Tensor):
                 embedding = embedding.detach().cpu().numpy()
             self.p2_embeddings.append(embedding)
@@ -452,7 +455,8 @@ class StatePayoffPredictor(PayoffPredictor):
         game,
         p1_agents: List[Any],
         p2_agents: List[Any],
-        encoder_fn: Callable,
+        p1_encoder_fn: Callable,
+        p2_encoder_fn: Callable,
         state_sampler: Callable,
         num_states_per_pair: int,
         hidden_dims: List[int],
@@ -466,7 +470,8 @@ class StatePayoffPredictor(PayoffPredictor):
             game: OpenSpiel game instance
             p1_agents: List of P1 agents
             p2_agents: List of P2 agents
-            encoder_fn: Function that maps an agent to an embedding vector
+            p1_encoder_fn: Function that maps a P1 agent to an embedding vector
+            p2_encoder_fn: Function that maps a P2 agent to an embedding vector
             state_sampler: Function that generates states from the game (takes game as input, returns list of states)
             num_states_per_pair: Number of states to sample per agent pair
             hidden_dims: Hidden layer dimensions for the predictor network
@@ -483,7 +488,8 @@ class StatePayoffPredictor(PayoffPredictor):
             game=game,
             p1_agents=p1_agents,
             p2_agents=p2_agents,
-            encoder_fn=encoder_fn,
+            p1_encoder_fn=p1_encoder_fn,
+            p2_encoder_fn=p2_encoder_fn,
             hidden_dims=hidden_dims,
             dropout=dropout,
             device=device

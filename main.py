@@ -86,11 +86,16 @@ def test_downstream_task_a(
     NUM_AGENTS_2 = 1000
     if downstream_task_ppo_agents is None:
         downstream_task_ppo_agents = [PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE) for i in range(NUM_AGENTS_2)]
+
+    # dummy encoder for fixed P2
+    p2_encoder_fn = lambda x: np.array([0])
+
     predictor = PayoffPredictor(
         game=game,
         p1_agents=downstream_task_ppo_agents,
         p2_agents=[opponent_policy],
-        encoder_fn=encoder_fn,
+        p1_encoder_fn=encoder_fn,
+        p2_encoder_fn=p2_encoder_fn,
         hidden_dims=hidden_dims,
         dropout=0.2,
         device="cpu"
@@ -216,7 +221,8 @@ def test_downstream_task_b(
         game=game,
         p1_agents=p1_agents,
         p2_agents=p2_agents,
-        encoder_fn=encoder_fn,
+        p1_encoder_fn=encoder_fn,
+        p2_encoder_fn=encoder_fn,
         hidden_dims=hidden_dims,
         dropout=0.2,
         device=device
@@ -350,7 +356,8 @@ def test_downstream_task_c(
         game=game,
         p1_agents=p1_agents,
         p2_agents=p2_agents,
-        encoder_fn=encoder_fn,
+        p1_encoder_fn=encoder_fn,
+        p2_encoder_fn=encoder_fn,
         state_sampler=state_sampler,
         num_states_per_pair=NUM_STATES,
         hidden_dims=hidden_dims,
