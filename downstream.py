@@ -164,8 +164,7 @@ class PayoffPredictor:
         self.p2_embeddings = np.array(self.p2_embeddings)
 
         # Concatenate P1 and P2 embeddings for input
-        single_embedding_dim = self.p1_embeddings.shape[1]
-        self.embedding_dim = single_embedding_dim * 2
+        self.embedding_dim = self.p1_embeddings.shape[1] + self.p2_embeddings.shape[1]
 
         # Initialize the predictor model
         self.model = PayoffModel(
@@ -191,7 +190,15 @@ class PayoffPredictor:
 
         for p1_idx, p1_agent in enumerate(tqdm(self.p1_agents, desc="P1 agents")):
             for p2_idx, p2_agent in enumerate(self.p2_agents):
-                payoff = get_expected_payoffs(self.game, p1_agent, p2_agent)
+                # Handle both PPOAgent and Policy for p2_agent
+                if hasattr(p2_agent, 'actor'):
+                    # PPOAgent - wrap it in a policy
+                    p2_policy = PPOAgentPolicy(self.game, p2_agent, 1, False)
+                else:
+                    # Already a policy
+                    p2_policy = p2_agent
+
+                payoff = get_expected_payoffs(self.game, p1_agent, p2_policy)
                 payoffs.append(payoff)
                 pair_indices.append((p1_idx, p2_idx))
 
@@ -221,8 +228,6 @@ class PayoffPredictor:
         Returns:
             dict: Training history with train/val losses
         """
-        # Set seed for reproducibility
-        set_seed(seed)
         # Compute ground truth if not already done
         if self.ground_truth_payoffs is None:
             self.compute_ground_truth_payoffs()
@@ -353,11 +358,11 @@ class PayoffPredictor:
         self.model.eval()
         with torch.no_grad():
             # Encode both agents
-            p1_embedding = self.encoder_fn(p1_agent)
+            p1_embedding = self.p1_encoder_fn(p1_agent)
             if isinstance(p1_embedding, torch.Tensor):
                 p1_embedding = p1_embedding.detach().cpu().numpy()
 
-            p2_embedding = self.encoder_fn(p2_agent)
+            p2_embedding = self.p2_encoder_fn(p2_agent)
             if isinstance(p2_embedding, torch.Tensor):
                 p2_embedding = p2_embedding.detach().cpu().numpy()
 
@@ -509,8 +514,7 @@ class StatePayoffPredictor(PayoffPredictor):
 
         # Update embedding dimension to include state
         state_dim = self.state_tensors.shape[1]
-        agent_embedding_dim = self.p1_embeddings.shape[1]
-        self.embedding_dim = agent_embedding_dim * 2 + state_dim
+        self.embedding_dim = self.p1_embeddings.shape[1] + self.p2_embeddings.shape[1] + state_dim
 
         # Reinitialize model with correct embedding dimension
         self.model = PayoffModel(
@@ -568,7 +572,6 @@ class StatePayoffPredictor(PayoffPredictor):
         learning_rate: float = 1e-3,
         validation_split: float = 0.2,
         verbose: bool = True,
-        seed: int = 42
     ):
         """
         Train the payoff predictor model.
@@ -584,8 +587,6 @@ class StatePayoffPredictor(PayoffPredictor):
         Returns:
             dict: Training history with train/val losses
         """
-        # Set seed for reproducibility
-        set_seed(seed)
         # Compute ground truth if not already done
         if self.ground_truth_payoffs is None:
             self.compute_ground_truth_payoffs()
@@ -709,12 +710,12 @@ class StatePayoffPredictor(PayoffPredictor):
         self.model.eval()
         with torch.no_grad():
             # Encode P1 agent
-            p1_embedding = self.encoder_fn(p1_agent)
+            p1_embedding = self.p1_encoder_fn(p1_agent)
             if isinstance(p1_embedding, torch.Tensor):
                 p1_embedding = p1_embedding.detach().cpu().numpy()
 
             # Encode P2 agent
-            p2_embedding = self.encoder_fn(p2_agent)
+            p2_embedding = self.p2_encoder_fn(p2_agent)
             if isinstance(p2_embedding, torch.Tensor):
                 p2_embedding = p2_embedding.detach().cpu().numpy()
 

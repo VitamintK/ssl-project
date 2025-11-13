@@ -113,6 +113,7 @@ def test_downstream_task_a(
     print("\nEvaluating model on validation set...")
     val_metrics = predictor.evaluate(eval_set="val")
     print(f"\nValidation Set Results:")
+    logger.info(f"MSE: {val_metrics['mse']:.6f}")
     print(f"MSE: {val_metrics['mse']:.6f}")
     print(f"MAE: {val_metrics['mae']:.6f}")
 
@@ -242,6 +243,7 @@ def test_downstream_task_b(
     print("\nEvaluating model on validation set...")
     val_metrics = predictor.evaluate(eval_set="val")
     print(f"\nValidation Set Results:")
+    logger.info(f"MSE: {val_metrics['mse']:.6f}")
     print(f"MSE: {val_metrics['mse']:.6f}")
     print(f"MAE: {val_metrics['mae']:.6f}")
 
@@ -379,6 +381,7 @@ def test_downstream_task_c(
     print("\nEvaluating model on validation set...")
     val_metrics = predictor.evaluate(eval_set="val")
     print(f"\nValidation Set Results:")
+    logger.info(f"MSE: {val_metrics['mse']:.6f}")
     print(f"MSE: {val_metrics['mse']:.6f}")
     print(f"MAE: {val_metrics['mae']:.6f}")
 
