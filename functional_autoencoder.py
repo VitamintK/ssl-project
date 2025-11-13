@@ -225,22 +225,6 @@ def train_functional_autoencoder(
     return model, epoch_losses
 
 
-def save_functional_autoencoder(
-    model: Autoencoder,
-    cfg: AutoencoderConfig,
-    path: str | Path,
-) -> None:
-    """Thin wrapper that reuses the standard autoencoder checkpoint code."""
-    save_autoencoder(model, cfg, path)
-
-
-def load_functional_autoencoder(
-    path: str | Path,
-    device: str | torch.device | None = None,
-) -> tuple[Autoencoder, AutoencoderConfig]:
-    """Mirror the weight autoencoder loader for API symmetry."""
-    return load_autoencoder(path, device)
-
 
 class FunctionalEncoderAdapter:
     """Expose the autoencoder's weight encoder via a simple API."""
@@ -271,12 +255,11 @@ class FunctionalEncoderAdapter:
         return encoder_fn
 
 
-# def _hidden_dims_arg(value: str) -> tuple[int, ...]:
-#     dims = [int(v.strip()) for v in value.split(",") if v.strip()]
-#     if not dims:
-#         raise argparse.ArgumentTypeError("hidden dims must not be empty")
-#     return tuple(dims)
-
+def _hidden_dims_arg(value: str) -> tuple[int, ...]:
+    dims = [int(v.strip()) for v in value.split(",") if v.strip()]
+    if not dims:
+        raise argparse.ArgumentTypeError("hidden dims must not be empty")
+    return tuple(dims)
 
 def parse_args() -> TrainingConfig:
     parser = argparse.ArgumentParser(description="Train functional autoencoder.")
