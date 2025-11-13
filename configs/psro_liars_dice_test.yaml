@@ -1,0 +1,46 @@
+algorithm_name: psro
+ckpt_freq: 1
+hidden_layer_size: 512
+inner_rl_agent:
+  algorithm_name: ppo
+  anneal_lr: false # there's an assert statement for this to be False
+  clip_coef: 0.025
+  clip_vloss: true
+  ent_coef: 0.1
+  gae: true
+  gae_lambda: 0.95
+  gamma: 0.99
+  hidden_size: 256
+  learning_rate: 6.25e-05
+  max_grad_norm: 0.5
+  norm_adv: true
+  num_envs: 8
+  num_minibatches: 1
+  num_steps: 256
+  target_kl: null
+  update_epochs: 8
+  vf_coef: 0.0625
+
+  # batch_size: 8
+  # discount_factor: 1.0
+  # epsilon_decay_duration: 80000000
+  # epsilon_end: 0.002
+  # epsilon_start: 0.48
+  # learn_every: 10
+  # learning_rate: 0.08
+  # loss_str: mse
+  # optimizer_str: adam
+  # replay_buffer_capacity: 25000
+  # update_target_network_every: 250
+meta_strategy_method: nash
+n_hidden_layers: 3
+number_policies_selected: 1
+number_training_episodes: 8000
+optimizer_str: adam
+oracle_type: ppo
+rectifier: ''
+self_play_proportion: 0.0
+sigma: 0.0
+sims_per_entry: 250
+symmetric_game: false
+training_strategy_selector: probabilistic
