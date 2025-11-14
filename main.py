@@ -42,6 +42,7 @@ def test_downstream_task_a(
         downstream_task_ppo_agents: Optional[list[PPOAgent]] = None,
         experiment_label: str = "downstream_a",
         device: str = "cpu",
+        functional_dataset_fraction: float = 1.0,
 ):
     """
     Test the PayoffPredictor on Kuhn Poker with the specified configuration.
@@ -51,6 +52,7 @@ def test_downstream_task_a(
         predictor_type: Type of predictor ("mlp" or "linear")
         encoder_type: Type of encoder ("identity", "weight_autoencoder", or "functional_autoencoder")
         experiment_label: Label for the experiment subdirectory (default: "downstream_a")
+        functional_dataset_fraction: Fraction of functional AE training data to keep (only used for the functional encoder)
     """
     game_short_name = game.get_type().short_name
     info_state_size = game.information_state_tensor_shape()
@@ -120,26 +122,29 @@ def test_downstream_task_a(
                 PPOAgent(num_actions, info_state_size, 'cpu', layer_init, encoder_agents_hidden_size)
                 for _ in range(autoencoder_agent_count)
             ]
-        feature_cfg = TrainingConfig(
+        if not (0 < functional_dataset_fraction <= 1):
+            raise ValueError("functional_dataset_fraction must be in the interval (0, 1].")
+        functional_cfg = TrainingConfig(
             num_agents=len(autoencoder_ppo_agents),
             ppo_hidden_size=encoder_agents_hidden_size,
             autoencoder=AutoencoderConfig(
                 hidden_dims=(512, 256),
                 bottleneck_dim=128,
                 epochs=10,
-                batch_size=16,
+                batch_size=64,
                 lr=3e-4,
                 device=device,
+                dataset_fraction=functional_dataset_fraction,
             ),
         )
-        print("\nTraining functional feature encoder...")
-        feature_model, feature_history = train_functional_autoencoder(
-            feature_cfg,
+        print("\nTraining functional functional encoder...")
+        functional_model, functional_history = train_functional_autoencoder(
+            functional_cfg,
             game=game,
             agents=autoencoder_ppo_agents,
         )
-        print(f"Feature encoder trained. Final KL: {feature_history[-1]:.6f}")
-        encoder_adapter = FunctionalEncoderAdapter(feature_model)
+        print(f"functional encoder trained. Final KL: {functional_history[-1]:.6f}")
+        encoder_adapter = FunctionalEncoderAdapter(functional_model)
         encoder_fn = encoder_adapter.get_encoder(device=device)
     elif encoder_type == 'identity':
         encoder_fn = ppo_agent_to_vector
@@ -154,8 +159,8 @@ def test_downstream_task_a(
     else:
         raise ValueError(f"Invalid predictor type: {predictor_type}")
     if downstream_task_ppo_agents is None:
-        NUM_P1_AGENTS = 500
-        NUM_P2_AGENTS = 500
+        NUM_P1_AGENTS = 100
+        NUM_P2_AGENTS = 100
         downstream_task_ppo_agents = [
             PPOAgent(
                 num_actions,
@@ -262,7 +267,7 @@ def test_downstream_task_b(
             hidden_dims=(512, 256),
             bottleneck_dim=64,
             epochs=50,
-            batch_size=64,
+            batch_size=16,
             lr=1e-3,
             device=device,
         )
@@ -408,8 +413,8 @@ def test_downstream_task_c(
         raise ValueError(f"Invalid encoder type: {encoder_type}")
 
     # Create separate agents for downstream task
-    NUM_P1_AGENTS = 500
-    NUM_P2_AGENTS = 500
+    NUM_P1_AGENTS = 100
+    NUM_P2_AGENTS = 100
     print("\nCreating P1 and P2 agents for downstream task...")
     p1_agents = [
         PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE)
@@ -501,45 +506,46 @@ if __name__ == "__main__":
 
     for game_name in ["kuhn_poker", "leduc_poker"]:
         game = pyspiel.load_game(game_name)
-        #if game_name == "kuhn_poker":
+        if game_name == "kuhn_poker":
             
-#             psro_ppo_agents_256 = load_ppo_agents_from_psro(hidden_size=256, shuffle=True)
-#             first_half, second_half = psro_ppo_agents_256[:len(psro_ppo_agents_256)//2], psro_ppo_agents_256[len(psro_ppo_agents_256)//2:]
-#             exp_label = f"Task A: psro {game_name} linear weight_autoencoder"
-#             logger.info(f"Running experiment: {exp_label}")
-#             test_downstream_task_a(game, predictor_type="linear", encoder_type="weight_autoencoder", autoencoder_ppo_agents=first_half, downstream_task_ppo_agents=second_half,
-# device=device)
-#             exp_label = f"a psro {game_name} linear identity"
-#             logger.info(f"Running experiment: {exp_label}")
-#             test_downstream_task_a(game, predictor_type="linear", encoder_type="identity", autoencoder_ppo_agents=first_half, downstream_task_ppo_agents=second_half, device=device)
-#             exp_label = f"Task Feature Encoder: psro {game_name} linear"
-#             logger.info(f"Running experiment: {exp_label}")
-#             test_downstream_task_a(
-#                 game,
-#                 predictor_type="linear",
-#                 encoder_type="functional_autoencoder",
-#                 autoencoder_ppo_agents=first_half,
-#                 downstream_task_ppo_agents=second_half,
-#                 experiment_label=exp_label,
-#                 device=device,
-#             )
+            psro_ppo_agents_256 = load_ppo_agents_from_psro(hidden_size=256, shuffle=True)
+            first_half, second_half = psro_ppo_agents_256[:len(psro_ppo_agents_256)//2], psro_ppo_agents_256[len(psro_ppo_agents_256)//2:]
+            exp_label = f"Task A: psro {game_name} linear weight_autoencoder"
+            logger.info(f"Running experiment: {exp_label}")
+            test_downstream_task_a(game, predictor_type="linear", encoder_type="weight_autoencoder", autoencoder_ppo_agents=first_half, downstream_task_ppo_agents=second_half,
+device=device)
+            exp_label = f"a psro {game_name} linear identity"
+            logger.info(f"Running experiment: {exp_label}")
+            test_downstream_task_a(game, predictor_type="linear", encoder_type="identity", autoencoder_ppo_agents=first_half, downstream_task_ppo_agents=second_half, device=device)
+            exp_label = f"Task functional Encoder: psro {game_name} linear"
+            logger.info(f"Running experiment: {exp_label}")
+            test_downstream_task_a(
+                game,
+                predictor_type="linear",
+                encoder_type="functional_autoencoder",
+                autoencoder_ppo_agents=first_half,
+                downstream_task_ppo_agents=second_half,
+                experiment_label=exp_label,
+                device=device,
+            )
 
           
+        else:
+            exp_label = f"Task A: random {game_name} linear weight_autoencoder"
+            logger.info(f"Running experiment: {exp_label}")
+            test_downstream_task_a(game, predictor_type="linear", encoder_type="weight_autoencoder", device=device)
 
-        exp_label = f"Task A: random {game_name} linear weight_autoencoder"
-        logger.info(f"Running experiment: {exp_label}")
-        test_downstream_task_a(game, predictor_type="linear", encoder_type="weight_autoencoder", device=device)
+            exp_label = f"Task A: random {game_name} linear identity"
+            logger.info(f"Running experiment: {exp_label}")
+            test_downstream_task_a(game, predictor_type="linear", encoder_type="identity", device=device)
 
-        exp_label = f"Task A: random {game_name} linear identity"
-        logger.info(f"Running experiment: {exp_label}")
-        test_downstream_task_a(game, predictor_type="linear", encoder_type="identity", device=device)
-
-        exp_label = f"Task Feature Encoder: {game_name} linear"
-        logger.info(f"Running experiment: {exp_label}")
-        test_downstream_task_a(
-            game,
-            predictor_type="linear",
-            encoder_type="functional_autoencoder",
-            experiment_label=exp_label,
-            device=device,
-        )
+            exp_label = f"Task functional Encoder: {game_name} linear"
+            logger.info(f"Running experiment: {exp_label}")
+            test_downstream_task_a(
+                game,
+                predictor_type="linear",
+                encoder_type="functional_autoencoder",
+                experiment_label=exp_label,
+                device=device,
+                functional_dataset_fraction=0.01,
+            )

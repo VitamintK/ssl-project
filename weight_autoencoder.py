@@ -60,6 +60,7 @@ class AutoencoderConfig:
     val_split: float = 0.1
     seed: int = 0
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    dataset_fraction: float = 1.0
 
 class WeightAutoencoder:
     def __init__(self, cfg: AutoencoderConfig, policies: list[any], policy_to_vector: Callable):

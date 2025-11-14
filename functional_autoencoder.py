@@ -10,7 +10,7 @@ from typing import Iterable, Callable
 import torch
 from torch import nn
 from torch.nn.utils.stateless import functional_call
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 import pyspiel
 from open_spiel.python.algorithms import get_all_states
@@ -120,6 +120,28 @@ class PolicyBehaviorDataset(Dataset):
         }
 
 
+def _fractional_subset(
+    dataset: Dataset,
+    fraction: float | None,
+    seed: int | None = None,
+) -> Dataset:
+    """Return a randomly sampled subset of the dataset controlled by `fraction`."""
+    if fraction is None or fraction >= 1.0:
+        return dataset
+    if not (0 < fraction <= 1):
+        raise ValueError("dataset_fraction must be in the interval (0, 1].")
+
+    subset_size = max(1, int(len(dataset) * fraction))
+    if subset_size == len(dataset):
+        return dataset
+
+    generator = torch.Generator()
+    if seed is not None:
+        generator.manual_seed(seed)
+    indices = torch.randperm(len(dataset), generator=generator)[:subset_size].tolist()
+    return Subset(dataset, indices)
+
+
 @dataclass
 class TrainingConfig:
     num_agents: int = 8
@@ -140,6 +162,7 @@ def masked_kl_divergence(
     safe_targets = targets * mask.float()
     safe_targets = safe_targets / safe_targets.sum(dim=-1, keepdim=True).clamp_min(1e-8)
     log_safe_targets = torch.log(safe_targets.clamp_min(1e-8))
+    log_probs = log_probs.masked_fill(~mask, 0.0)
 
     loss = (safe_targets * (log_safe_targets - log_probs)).sum(dim=-1)
 
@@ -211,14 +234,19 @@ def train_functional_autoencoder(
     param_specs = _actor_param_specs(actor_template)
 
     print("making data loader...")
-    loader = DataLoader(dataset, batch_size=ae_cfg.batch_size, shuffle=True)
+    dataset_fraction = getattr(ae_cfg, "dataset_fraction", 1.0)
+    train_dataset = _fractional_subset(dataset, dataset_fraction, getattr(ae_cfg, "seed", None))
+    if len(train_dataset) != len(dataset):
+        frac = len(train_dataset) / len(dataset)
+        print(f"Subsampled training dataset to {len(train_dataset)} samples ({frac:.1%} of full dataset).")
+    loader = DataLoader(train_dataset, batch_size=ae_cfg.batch_size, shuffle=True)
     print("starting training...")
     optimizer = torch.optim.Adam(model.parameters(), lr=ae_cfg.lr, weight_decay=ae_cfg.weight_decay)
     epoch_losses: list[float] = []
 
     for epoch in range(1, ae_cfg.epochs + 1):
         total_loss = 0.0
-        for batch in loader:
+        for batch_idx, batch in enumerate(loader):
             weights = batch["weights"].to(cfg.device)
             states = batch["states"].to(cfg.device)
             probs = batch["probs"].to(cfg.device)
@@ -233,7 +261,7 @@ def train_functional_autoencoder(
 
             total_loss += loss.item() * weights.size(0)
 
-        avg_loss = total_loss / len(dataset)
+        avg_loss = total_loss / len(train_dataset)
         print(f"Epoch {epoch}: KL {avg_loss:.4f}")
         epoch_losses.append(avg_loss)
 
@@ -286,6 +314,12 @@ def parse_args() -> TrainingConfig:
     parser.add_argument("--hidden-dims", type=_hidden_dims_arg, default=(512, 256))
     parser.add_argument("--bottleneck-dim", type=int, default=128)
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument(
+        "--dataset-fraction",
+        type=float,
+        default=1.0,
+        help="Fraction of (agent, state) pairs to use for training (0 < f <= 1).",
+    )
     args = parser.parse_args()
 
     device = args.device or get_device_string()
@@ -298,6 +332,7 @@ def parse_args() -> TrainingConfig:
         batch_size=args.batch_size,
         epochs=args.epochs,
         device=device,
+        dataset_fraction=args.dataset_fraction,
     )
 
     return TrainingConfig(
