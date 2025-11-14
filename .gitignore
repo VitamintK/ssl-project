@@ -14,6 +14,9 @@ checkpoints/
 *.pyc
 *.gz
 *.pt
+!results/**/*.pt
+results/**/*.npy
+results/**/*.pkl
 *.pth
 
 # Test files
