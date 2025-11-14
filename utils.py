@@ -7,7 +7,7 @@ from open_spiel.python.algorithms.psro_v2.abstract_meta_trainer import sample_ep
 
 def get_device_string():
     if torch.cuda.is_available():
-        return 'cude'
+        return 'cuda'
     elif torch.backends.mps.is_available():
         return 'mps'
     else:
@@ -72,3 +72,4 @@ if __name__ == '__main__':
     x = ppo.PPOAgent(num_actions, observation_shape, 'cpu', diverse_random_kuhn_poker_layer_init)
     uniform_random_policy = policy.UniformRandomPolicy(game)
     print(get_expected_payoffs(game, x, uniform_random_policy))
+

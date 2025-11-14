@@ -9,6 +9,9 @@ from torch.utils.data import DataLoader, Dataset, random_split
 from tqdm import tqdm
 from iig_rl_benchmark.algorithms.ppo import ppo
 
+from pathlib import Path
+from dataclasses import asdict
+
 class VectorDataset(Dataset):
     """Simple dataset wrapper for 2D weight tensors."""
 
@@ -57,6 +60,7 @@ class AutoencoderConfig:
     val_split: float = 0.1
     seed: int = 0
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    dataset_fraction: float = 1.0
 
 class WeightAutoencoder:
     def __init__(self, cfg: AutoencoderConfig, policies: list[any], policy_to_vector: Callable):
@@ -154,6 +158,8 @@ class WeightAutoencoder:
                 total_items += batch.size(0)
         return total_loss / total_items
 
+
+
     def get_encoder(self, device: str = "cpu") -> callable:
         """
         Get the encoder part of a trained autoencoder as a callable function.
@@ -191,6 +197,50 @@ def _split_lengths(total_len: int, val_split: float) -> tuple[int, int]:
         raise ValueError("Not enough training samples; reduce val_split or increase dataset size.")
 
     return train_len, val_len
+
+def save_autoencoder(
+    model: Autoencoder,
+    cfg: AutoencoderConfig,
+    path: str | Path,
+) -> None:
+    """Persist the autoencoder weights along with the config metadata."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint = {"state_dict": model.state_dict(), "config": asdict(cfg)} 
+    torch.save(checkpoint, path)
+
+
+def load_autoencoder(
+    path: str | Path,
+    device: str | torch.device | None = None,
+) -> tuple[Autoencoder, AutoencoderConfig]:
+    """Load a saved autoencoder checkpoint."""
+    map_location = device or "cpu"
+    checkpoint = torch.load(Path(path), map_location=map_location)
+    cfg_dict = checkpoint.get("config")
+    if cfg_dict is None:
+        raise ValueError("Checkpoint is missing autoencoder config metadata.")
+
+    cfg = AutoencoderConfig(**cfg_dict)
+
+    state_dict = checkpoint.get("state_dict")
+    if state_dict is None:
+        raise ValueError("Checkpoint is missing state_dict.")
+
+    try:
+        input_dim = state_dict["encoder.0.weight"].shape[1]
+    except KeyError as exc:
+        raise KeyError("Unable to infer input dimension from checkpoint state_dict.") from exc
+
+    autoencoder = Autoencoder(input_dim, cfg.hidden_dims, cfg.bottleneck_dim)
+    autoencoder.load_state_dict(state_dict)
+    autoencoder.to(map_location)
+    autoencoder.eval()
+
+    if device is not None:
+        cfg.device = str(device)
+
+    return autoencoder, cfg
 
 def _parse_args() -> argparse.Namespace:
     def hidden_dims_arg(value: str) -> tuple[int, ...]:
