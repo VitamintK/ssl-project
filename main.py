@@ -127,7 +127,7 @@ def test_downstream_task_a(
                 hidden_dims=(512, 256),
                 bottleneck_dim=128,
                 epochs=10,
-                batch_size=32,
+                batch_size=16,
                 lr=3e-4,
                 device=device,
             ),

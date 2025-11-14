@@ -66,48 +66,57 @@ class PolicyBehaviorDataset(Dataset):
         num_actions: int,
         device: torch.device | str,
     ):
-        weight_vectors: list[torch.Tensor] = []
+        self.device = torch.device(device)
+        self.agents = list(agents)
+        if not self.agents:
+            raise ValueError("PolicyBehaviorDataset requires at least one agent.")
+
+        self.agent_weights = torch.stack(
+            [ppo_agent_to_vector(agent).cpu() for agent in self.agents]
+        )
+
         state_vectors: list[torch.Tensor] = []
-        action_probs: list[torch.Tensor] = []
         legal_masks: list[torch.Tensor] = []
+        for state in decision_states:
+            player = state.current_player()
+            if player < 0:
+                continue
+            mask = _legal_mask(state, player, num_actions)
+            if not mask.any():
+                continue
 
-        for agent in agents:
-            weight_vec = ppo_agent_to_vector(agent).cpu()
-            for state in decision_states:
-                player = state.current_player()
-                if player < 0:
-                    continue
-                mask = _legal_mask(state, player, num_actions)
-                if not mask.any():
-                    continue
+            obs = _state_tensor(state, player)
+            state_vectors.append(obs)
+            legal_masks.append(mask)
 
-                obs = _state_tensor(state, player)
-                with torch.no_grad():
-                    _, _, _, _, probs = agent.get_action_and_value(
-                        obs.unsqueeze(0).to(device),
-                        mask.unsqueeze(0).to(device),
-                    )
-                prob_vec = probs.squeeze(0).cpu()
+        if not state_vectors:
+            raise ValueError("PolicyBehaviorDataset requires at least one decision state.")
 
-                weight_vectors.append(weight_vec)
-                state_vectors.append(obs)
-                action_probs.append(prob_vec)
-                legal_masks.append(mask)
-
-        self.weights = torch.stack(weight_vectors)
         self.states = torch.stack(state_vectors)
-        self.probs = torch.stack(action_probs)
         self.legal_masks = torch.stack(legal_masks)
+        self.num_states = self.states.size(0)
 
     def __len__(self) -> int:
-        return self.weights.size(0)
+        return len(self.agents) * self.num_states
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        agent_idx = idx // self.num_states
+        state_idx = idx % self.num_states
+
+        agent = self.agents[agent_idx]
+        obs = self.states[state_idx]
+        mask = self.legal_masks[state_idx]
+        with torch.no_grad():
+            _, _, _, _, probs = agent.get_action_and_value(
+                obs.unsqueeze(0).to(self.device),
+                mask.unsqueeze(0).to(self.device),
+            )
+
         return {
-            "weights": self.weights[idx],
-            "states": self.states[idx],
-            "probs": self.probs[idx],
-            "legal_masks": self.legal_masks[idx],
+            "weights": self.agent_weights[agent_idx],
+            "states": obs,
+            "probs": probs.squeeze(0).cpu(),
+            "legal_masks": mask,
         }
 
 
@@ -187,17 +196,23 @@ def train_functional_autoencoder(
 
     agents = agents or build_agents(cfg.num_agents, num_actions, info_state_shape, cfg.ppo_hidden_size)
     decision_states = decision_states or collect_decision_states(game)
+    print(f"Collected {len(decision_states)} decision states from the game.")
     dataset = PolicyBehaviorDataset(agents, decision_states, num_actions, "cpu")
-
-    weight_dim = dataset.weights.size(1)
+    print(f"Constructed dataset with {len(dataset)} (agent, state) pairs.")
+    weight_dim = dataset.agent_weights.size(1)
     ae_cfg = cfg.autoencoder
     model = Autoencoder(weight_dim, ae_cfg.hidden_dims, ae_cfg.bottleneck_dim).to(cfg.device)
+    print("makde model")
+
     actor_template = PPOAgent(
         num_actions, info_state_shape, cfg.device, hidden_size=cfg.ppo_hidden_size
     ).actor.to(cfg.device)
+    print
     param_specs = _actor_param_specs(actor_template)
 
+    print("making data loader...")
     loader = DataLoader(dataset, batch_size=ae_cfg.batch_size, shuffle=True)
+    print("starting training...")
     optimizer = torch.optim.Adam(model.parameters(), lr=ae_cfg.lr, weight_decay=ae_cfg.weight_decay)
     epoch_losses: list[float] = []
 
