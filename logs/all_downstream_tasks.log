@@ -1,2 +1,12 @@
+Running experiment: Task A: psro kuhn_poker linear weight_autoencoder
+MSE: 0.024236
+Running experiment: a psro kuhn_poker linear identity
+MSE: 0.095473
+Running experiment: Task functional Encoder: psro kuhn_poker linear
+MSE: 0.021798
+Running experiment: Task A: random leduc_poker linear weight_autoencoder
+MSE: 0.316091
+Running experiment: Task A: random leduc_poker linear identity
+MSE: 0.554637
 Running experiment: Task functional Encoder: leduc_poker linear
-MSE: 0.288900
+MSE: 0.643420
