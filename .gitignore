@@ -17,6 +17,7 @@ checkpoints/
 !results/**/*.pt
 results/**/*.npy
 results/**/*.pkl
+results/**/old/
 *.pth
 
 # Test files
