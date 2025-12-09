@@ -16,6 +16,7 @@ from typing import List, Callable, Any, Optional
 from tqdm import tqdm
 
 from open_spiel.python.algorithms.psro_v2.abstract_meta_trainer import sample_episode
+from open_spiel.python.policy import Policy
 from utils import PPOAgentPolicy, get_expected_payoffs
 
 
@@ -115,10 +116,14 @@ class PayoffPredictor:
     def __init__(
         self,
         game,
-        p1_agents: List[Any],
-        p2_agents: List[Any],
-        p1_encoder_fn: Callable,
-        p2_encoder_fn: Callable,
+        # p1_agents: List[Policy],
+        # p2_agents: List[Policy],
+        p1_policies: list[Policy],
+        p2_policies: list[Policy],
+        # p1_encoder_fn: Callable,
+        # p2_encoder_fn: Callable,
+        p1_embeddings: list[np.ndarray],
+        p2_embeddings: list[np.ndarray],
         hidden_dims: List[int],
         dropout: float,
         device: str = "cpu"
@@ -137,68 +142,35 @@ class PayoffPredictor:
             device: cpu or cuda
         """
         self.game = game
-        self.p1_agents = p1_agents
-        self.p2_agents = p2_agents
-        self.p1_encoder_fn = p1_encoder_fn
-        self.p2_encoder_fn = p2_encoder_fn
+        self.p1_policies = p1_policies
+        self.p2_policies = p2_policies
         self.device = device
-
-        # Encode P1 agents
-        print("Encoding P1 agents...")
-        self.p1_embeddings = []
-        for agent in tqdm(p1_agents):
-            embedding = p1_encoder_fn(agent)
-            if isinstance(embedding, torch.Tensor):
-                embedding = embedding.detach().cpu().numpy()
-            self.p1_embeddings.append(embedding)
-        self.p1_embeddings = np.array(self.p1_embeddings)
-
-        # Encode P2 agents
-        print("Encoding P2 agents...")
-        self.p2_embeddings = []
-        for agent in tqdm(p2_agents):
-            embedding = p2_encoder_fn(agent)
-            if isinstance(embedding, torch.Tensor):
-                embedding = embedding.detach().cpu().numpy()
-            self.p2_embeddings.append(embedding)
-        self.p2_embeddings = np.array(self.p2_embeddings)
-
+        self.p1_embeddings = np.array(p1_embeddings)
+        self.p2_embeddings = np.array(p2_embeddings)
         # Concatenate P1 and P2 embeddings for input
         self.embedding_dim = self.p1_embeddings.shape[1] + self.p2_embeddings.shape[1]
-
         # Initialize the predictor model
         self.model = PayoffModel(
             self.embedding_dim,
             hidden_dims=hidden_dims,
             dropout=dropout
         ).to(device)
-
         self.optimizer = None
         self.criterion = nn.MSELoss()
-
         self.ground_truth_payoffs = None
-
         self.train_indices = None
         self.val_indices = None
 
     def compute_ground_truth_payoffs(self):
         """Compute ground truth payoffs for all P1-P2 agent pairs."""
 
-        print(f"Computing ground truth payoffs for {len(self.p1_agents)} x {len(self.p2_agents)} agent pairs...")
+        print(f"Computing ground truth payoffs for {len(self.p1_policies)} x {len(self.p2_policies)} agent pairs...")
         payoffs = []
         pair_indices = []  # Store (p1_idx, p2_idx) for each payoff
 
-        for p1_idx, p1_agent in enumerate(tqdm(self.p1_agents, desc="P1 agents")):
-            for p2_idx, p2_agent in enumerate(self.p2_agents):
-                # Handle both PPOAgent and Policy for p2_agent
-                if hasattr(p2_agent, 'actor'):
-                    # PPOAgent - wrap it in a policy
-                    p2_policy = PPOAgentPolicy(self.game, p2_agent, 1, False)
-                else:
-                    # Already a policy
-                    p2_policy = p2_agent
-
-                payoff = get_expected_payoffs(self.game, p1_agent, p2_policy)
+        for p1_idx, p1_policy in enumerate(tqdm(self.p1_policies, desc="P1 policies")):
+            for p2_idx, p2_policy in enumerate(self.p2_policies):
+                payoff = get_expected_payoffs(self.game, p1_policy, p2_policy)
                 payoffs.append(payoff)
                 pair_indices.append((p1_idx, p2_idx))
 
@@ -243,44 +215,44 @@ class PayoffPredictor:
         embeddings = np.array(embeddings)
 
         # Split P1 agents to avoid leakage
-        n_p1_agents = len(self.p1_agents)
-        n_val_p1_agents = max(1, int(n_p1_agents * validation_split))  # Ensure at least 1 val agent
-        if n_val_p1_agents >= n_p1_agents:
-            raise ValueError(f"Not enough P1 agents ({n_p1_agents}) to create train/val split. Need at least 2.")
-        p1_agent_indices = np.random.permutation(n_p1_agents)
-        val_p1_agent_set = set(p1_agent_indices[:n_val_p1_agents])
-        train_p1_agent_set = set(p1_agent_indices[n_val_p1_agents:])
+        n_p1_policies = len(self.p1_policies)
+        n_val_p1_policies = max(1, int(n_p1_policies * validation_split))  # Ensure at least 1 val agent
+        if n_val_p1_policies >= n_p1_policies:
+            raise ValueError(f"Not enough P1 agents ({n_p1_policies}) to create train/val split. Need at least 2.")
+        p1_policy_indices = np.random.permutation(n_p1_policies)
+        val_p1_policy_set = set(p1_policy_indices[:n_val_p1_policies])
+        train_p1_policy_set = set(p1_policy_indices[n_val_p1_policies:])
 
         # Check if we should split P2 agents or use all P2 agents in both sets
-        n_p2_agents = len(self.p2_agents)
-        if n_p2_agents == 1:
+        n_p2_policies = len(self.p2_policies)
+        if n_p2_policies == 1:
             # Single fixed opponent: use in both train and val
             print("Single P2 agent detected - using same opponent for train and val")
             train_indices = np.array([i for i, (p1_idx, p2_idx) in enumerate(self.pair_indices)
-                                      if p1_idx in train_p1_agent_set], dtype=int)
+                                      if p1_idx in train_p1_policy_set], dtype=int)
             val_indices = np.array([i for i, (p1_idx, p2_idx) in enumerate(self.pair_indices)
-                                    if p1_idx in val_p1_agent_set], dtype=int)
+                                    if p1_idx in val_p1_policy_set], dtype=int)
             print(f"Split summary: {len(train_indices)} training pairs, {len(val_indices)} validation pairs")
-            print(f"Training P1 agents: {len(train_p1_agent_set)}, Validation P1 agents: {len(val_p1_agent_set)}")
+            print(f"Training P1 agents: {len(train_p1_policy_set)}, Validation P1 agents: {len(val_p1_policy_set)}")
         else:
             # Multiple P2 agents: split them too
-            n_val_p2_agents = max(1, int(n_p2_agents * validation_split))
-            if n_val_p2_agents >= n_p2_agents:
-                raise ValueError(f"Not enough P2 agents ({n_p2_agents}) to create train/val split. Need at least 2.")
-            p2_agent_indices = np.random.permutation(n_p2_agents)
-            val_p2_agent_set = set(p2_agent_indices[:n_val_p2_agents])
-            train_p2_agent_set = set(p2_agent_indices[n_val_p2_agents:])
+            n_val_p2_policies = max(1, int(n_p2_policies * validation_split))
+            if n_val_p2_policies >= n_p2_policies:
+                raise ValueError(f"Not enough P2 agents ({n_p2_policies}) to create train/val split. Need at least 2.")
+            p2_policy_indices = np.random.permutation(n_p2_policies)
+            val_p2_policy_set = set(p2_policy_indices[:n_val_p2_policies])
+            train_p2_policy_set = set(p2_policy_indices[n_val_p2_policies:])
 
             # A pair is in validation only if BOTH P1 and P2 are in validation sets
             # A pair is in training only if BOTH P1 and P2 are in training sets
             train_indices = np.array([i for i, (p1_idx, p2_idx) in enumerate(self.pair_indices)
-                                      if p1_idx in train_p1_agent_set and p2_idx in train_p2_agent_set], dtype=int)
+                                      if p1_idx in train_p1_policy_set and p2_idx in train_p2_policy_set], dtype=int)
             val_indices = np.array([i for i, (p1_idx, p2_idx) in enumerate(self.pair_indices)
-                                    if p1_idx in val_p1_agent_set and p2_idx in val_p2_agent_set], dtype=int)
+                                    if p1_idx in val_p1_policy_set and p2_idx in val_p2_policy_set], dtype=int)
 
             print(f"Split summary: {len(train_indices)} training pairs, {len(val_indices)} validation pairs")
-            print(f"Training P1 agents: {len(train_p1_agent_set)}, Validation P1 agents: {len(val_p1_agent_set)}")
-            print(f"Training P2 agents: {len(train_p2_agent_set)}, Validation P2 agents: {len(val_p2_agent_set)}")
+            print(f"Training P1 agents: {len(train_p1_policy_set)}, Validation P1 agents: {len(val_p1_policy_set)}")
+            print(f"Training P2 agents: {len(train_p2_policy_set)}, Validation P2 agents: {len(val_p2_policy_set)}")
 
         # Store indices for later evaluation
         self.train_indices = train_indices
@@ -344,7 +316,7 @@ class PayoffPredictor:
 
         return history
 
-    def predict(self, p1_agent, p2_agent):
+    def predict(self, p1_embedding: np.ndarray, p2_embedding: np.ndarray):
         """
         Predict the expected payoff for a P1-P2 agent pair.
 
@@ -358,11 +330,11 @@ class PayoffPredictor:
         self.model.eval()
         with torch.no_grad():
             # Encode both agents
-            p1_embedding = self.p1_encoder_fn(p1_agent)
+            # p1_embedding = self.p1_encoder_fn(p1_agent)
             if isinstance(p1_embedding, torch.Tensor):
                 p1_embedding = p1_embedding.detach().cpu().numpy()
 
-            p2_embedding = self.p2_encoder_fn(p2_agent)
+            # p2_embedding = self.p2_encoder_fn(p2_agent)
             if isinstance(p2_embedding, torch.Tensor):
                 p2_embedding = p2_embedding.detach().cpu().numpy()
 
@@ -405,9 +377,9 @@ class PayoffPredictor:
         print("Computing predictions...")
         predictions = []
         for p1_idx, p2_idx in tqdm(test_pairs):
-            p1_agent = self.p1_agents[p1_idx]
-            p2_agent = self.p2_agents[p2_idx]
-            pred = self.predict(p1_agent, p2_agent)
+            p1_embedding = self.p1_embeddings[p1_idx]
+            p2_embedding = self.p2_embeddings[p2_idx]
+            pred = self.predict(p1_embedding, p2_embedding)
             predictions.append(pred)
         predictions = np.array(predictions)
 

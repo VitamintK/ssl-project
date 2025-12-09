@@ -8,8 +8,8 @@ import numpy as np
 
 from open_spiel.python import policy as policy_lib
 from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
-from psro import load_ppo_agents_from_psro
-from utils import get_device_string, make_diverse_random_kuhn_poker_layer_init
+from psro import load_ppo_agents_from_psro, make_neupl_policies
+from utils import PPOAgentPolicy, get_device_string, make_diverse_random_kuhn_poker_layer_init
 from functional_autoencoder import (
     TrainingConfig,
     train_functional_autoencoder,
@@ -159,8 +159,6 @@ def test_downstream_task_a(
     else:
         raise ValueError(f"Invalid predictor type: {predictor_type}")
     if downstream_task_ppo_agents is None:
-        NUM_P1_AGENTS = 100
-        NUM_P2_AGENTS = 100
         downstream_task_ppo_agents = [
             PPOAgent(
                 num_actions,
@@ -171,15 +169,14 @@ def test_downstream_task_a(
             )
             for _ in range(predictor_agent_count)
         ]
-    # dummy encoder for fixed P2
-    p2_encoder_fn = lambda x: np.array([0])
-
     predictor = PayoffPredictor(
         game=game,
-        p1_agents=downstream_task_ppo_agents,
-        p2_agents=[opponent_policy],
-        p1_encoder_fn=encoder_fn,
-        p2_encoder_fn=p2_encoder_fn,
+        p1_policies=[PPOAgentPolicy(game, agent, 0, False) for agent in downstream_task_ppo_agents],
+        p2_policies=[opponent_policy],
+        p1_embeddings=[encoder_fn(agent).detach().cpu().numpy() for agent in downstream_task_ppo_agents],
+        # TODO: we're detaching and moving to cpu/numpy here, but then later we just put them on the device anyways.
+        #       We should probably just keep them on the device as pytorch tensors the whole time.
+        p2_embeddings=[np.array([0])],
         hidden_dims=hidden_dims,
         dropout=0.2,
         device="cpu"
@@ -201,15 +198,21 @@ def test_downstream_task_a(
     print(f"MSE: {val_metrics['mse']:.6f}")
     print(f"MAE: {val_metrics['mae']:.6f}")
 
-    # Baseline: predict mean for everything
+    # Baseline: predict mean for everything (validation set)
     val_payoffs = predictor.ground_truth_payoffs[predictor.val_indices]
     mean_payoff = np.mean(val_payoffs)
     baseline_mse = np.mean((val_payoffs - mean_payoff) ** 2)
     baseline_mae = np.mean(np.abs(val_payoffs - mean_payoff))
+    # Baseline 2: predict mean for everything (training set)
+    train_payoffs = predictor.ground_truth_payoffs[predictor.train_indices]
+    mean_payoff2 = np.mean(train_payoffs)
+    baseline_mse2 = np.mean((val_payoffs - mean_payoff2) ** 2)
 
     print(f"\nBaseline (constant mean prediction: {mean_payoff:.6f}):")
     print(f"MSE: {baseline_mse:.6f}")
     print(f"MAE: {baseline_mae:.6f}")
+    print(f"\nBaseline 2 (constant mean prediction: {mean_payoff2:.6f}):")
+    print(f"MSE: {baseline_mse2:.6f}")
     print(f"\nModel improvement over baseline:")
     print(f"MSE reduction: {(1 - val_metrics['mse']/baseline_mse)*100:.2f}%")
     print(f"MAE reduction: {(1 - val_metrics['mae']/baseline_mae)*100:.2f}%")
@@ -229,6 +232,87 @@ def test_downstream_task_a(
     print(f"\nModel saved to: {save_path}")
 
     return predictor, history, val_metrics, train_metrics
+
+def test_downstream_task_a_with_neupl(
+        game: pyspiel.Game,
+        predictor_type: Literal["mlp", "linear"],
+        experiment_label: str = "downstream_a_neupl",
+        device: str = "cpu",
+):
+    game_short_name = game.get_type().short_name
+    policies_and_embeddings = make_neupl_policies(game_short_name, hidden_size=256, policy_embedding_size=64, original_num_policies=25, num_policies_to_make=3000)
+    opponent_policy = policy_lib.UniformRandomPolicy(game)
+    if predictor_type == "mlp":
+        hidden_dims = [128, 64, 32]
+    elif predictor_type == "linear":
+        hidden_dims = []
+    else:
+        raise ValueError(f"Invalid predictor type: {predictor_type}")
+    hidden_dims = [64]
+
+
+    predictor = PayoffPredictor(
+        game=game,
+        p1_policies=[p_e[1] for p_e in policies_and_embeddings[0]],
+        p2_policies=[opponent_policy],
+        p1_embeddings=[p_e[0].detach().cpu().numpy() for p_e in policies_and_embeddings[0]],
+        p2_embeddings=[np.array([0])],
+        hidden_dims=hidden_dims,
+        dropout=0.0,
+        device=device
+    )
+    print("\nTraining predictor model...")
+    history = predictor.train(
+        num_epochs=100,
+        batch_size=16,
+        learning_rate=1e-4,
+        validation_split=0.2,
+        verbose=True
+    )
+
+    # Evaluate payoff predictor on validation set
+    print("\nEvaluating model on validation set...")
+    val_metrics = predictor.evaluate(eval_set="val")
+    print(f"\nValidation Set Results:")
+    logger.info(f"MSE: {val_metrics['mse']:.6f}")
+    print(f"MSE: {val_metrics['mse']:.6f}")
+    print(f"MAE: {val_metrics['mae']:.6f}")
+
+    # Baseline: predict mean for everything (validation set)
+    val_payoffs = predictor.ground_truth_payoffs[predictor.val_indices]
+    mean_payoff = np.mean(val_payoffs)
+    baseline_mse = np.mean((val_payoffs - mean_payoff) ** 2)
+    baseline_mae = np.mean(np.abs(val_payoffs - mean_payoff))
+    # Baseline 2: predict mean for everything (training set)
+    train_payoffs = predictor.ground_truth_payoffs[predictor.train_indices]
+    mean_payoff2 = np.mean(train_payoffs)
+    baseline_mse2 = np.mean((val_payoffs - mean_payoff2) ** 2)
+
+    print(f"\nBaseline (constant mean prediction: {mean_payoff:.6f}):")
+    print(f"MSE: {baseline_mse:.6f}")
+    print(f"MAE: {baseline_mae:.6f}")
+    print(f"\nBaseline 2 (constant mean prediction: {mean_payoff2:.6f}):")
+    print(f"MSE: {baseline_mse2:.6f}")
+    print(f"\nModel improvement over baseline:")
+    print(f"MSE reduction: {(1 - val_metrics['mse']/baseline_mse)*100:.2f}%")
+    print(f"MAE reduction: {(1 - val_metrics['mae']/baseline_mae)*100:.2f}%")
+
+    # Evaluate payoff predictor on training set for comparison
+    print("\nEvaluating model on training set...")
+    train_metrics = predictor.evaluate(eval_set="train")
+    print(f"\nTraining Set Results:")
+    print(f"MSE: {train_metrics['mse']:.6f}")
+    print(f"MAE: {train_metrics['mae']:.6f}")
+
+    # Save the payoff predictor model
+    results_dir = Path("results") / experiment_label
+    results_dir.mkdir(parents=True, exist_ok=True)
+    save_path = results_dir / f"{game_short_name}_predictor_{predictor_type}.pth"
+    predictor.save(str(save_path))
+    print(f"\nModel saved to: {save_path}")
+
+    return predictor, history, val_metrics, train_metrics
+    
 
 def test_downstream_task_b(
         game: pyspiel.Game,
@@ -304,10 +388,10 @@ def test_downstream_task_b(
 
     predictor = PayoffPredictor(
         game=game,
-        p1_agents=p1_agents,
-        p2_agents=p2_agents,
-        p1_encoder_fn=encoder_fn,
-        p2_encoder_fn=encoder_fn,
+        p1_policies=[PPOAgentPolicy(game, agent, 0, False) for agent in p1_agents],
+        p2_policies=[PPOAgentPolicy(game, agent, 1, False) for agent in p2_agents],
+        p1_embeddings=[encoder_fn(agent).detach().cpu().numpy() for agent in p1_agents],
+        p2_embeddings=[encoder_fn(agent).detach().cpu().numpy() for agent in p2_agents],
         hidden_dims=hidden_dims,
         dropout=0.2,
         device=device
@@ -498,26 +582,27 @@ def test_downstream_task_c(
 
     return predictor, history, val_metrics, train_metrics
 
-
-if __name__ == "__main__":
+def run_all():
     device = get_device_string()
     print("Using device:", device)
     # set_seed(42)
 
-    for game_name in ["kuhn_poker", "leduc_poker"]:
+    # GAME_NAMES = ["kuhn_poker", "leduc_poker"]
+    GAME_NAMES = ["kuhn_poker"]
+    for game_name in GAME_NAMES:
         game = pyspiel.load_game(game_name)
         if game_name == "kuhn_poker":
-            
             psro_ppo_agents_256 = load_ppo_agents_from_psro(hidden_size=256, shuffle=True)
             first_half, second_half = psro_ppo_agents_256[:len(psro_ppo_agents_256)//2], psro_ppo_agents_256[len(psro_ppo_agents_256)//2:]
             exp_label = f"Task A: psro {game_name} linear weight_autoencoder"
+            logger.info(f"Number of PSRO agents: {len(psro_ppo_agents_256)}")
             logger.info(f"Running experiment: {exp_label}")
             test_downstream_task_a(game, predictor_type="linear", encoder_type="weight_autoencoder", autoencoder_ppo_agents=first_half, downstream_task_ppo_agents=second_half,
 device=device)
-            exp_label = f"a psro {game_name} linear identity"
+            exp_label = f"Task A: psro {game_name} linear identity"
             logger.info(f"Running experiment: {exp_label}")
             test_downstream_task_a(game, predictor_type="linear", encoder_type="identity", autoencoder_ppo_agents=first_half, downstream_task_ppo_agents=second_half, device=device)
-            exp_label = f"Task functional Encoder: psro {game_name} linear"
+            exp_label = f"Task A: psro {game_name} linear functional_encoder "
             logger.info(f"Running experiment: {exp_label}")
             test_downstream_task_a(
                 game,
@@ -528,24 +613,42 @@ device=device)
                 experiment_label=exp_label,
                 device=device,
             )
-
-          
-        else:
-            exp_label = f"Task A: random {game_name} linear weight_autoencoder"
+            exp_label = f"Task A: neupl {game_name} linear"
             logger.info(f"Running experiment: {exp_label}")
-            test_downstream_task_a(game, predictor_type="linear", encoder_type="weight_autoencoder", device=device)
+            test_downstream_task_a_with_neupl(game, predictor_type="linear", device=device)
+        exp_label = f"Task A: random {game_name} linear weight_autoencoder"
+        logger.info(f"Running experiment: {exp_label}")
+        test_downstream_task_a(game, predictor_type="linear", encoder_type="weight_autoencoder", device=device)
 
-            exp_label = f"Task A: random {game_name} linear identity"
-            logger.info(f"Running experiment: {exp_label}")
-            test_downstream_task_a(game, predictor_type="linear", encoder_type="identity", device=device)
+        exp_label = f"Task A: random {game_name} linear identity"
+        logger.info(f"Running experiment: {exp_label}")
+        test_downstream_task_a(game, predictor_type="linear", encoder_type="identity", device=device)
 
-            exp_label = f"Task functional Encoder: {game_name} linear"
-            logger.info(f"Running experiment: {exp_label}")
-            test_downstream_task_a(
-                game,
-                predictor_type="linear",
-                encoder_type="functional_autoencoder",
-                experiment_label=exp_label,
-                device=device,
-                functional_dataset_fraction=0.01,
-            )
+        exp_label = f"Task A: random {game_name} linear functional_encoder"
+        logger.info(f"Running experiment: {exp_label}")
+        test_downstream_task_a(
+            game,
+            predictor_type="linear",
+            encoder_type="functional_autoencoder",
+            experiment_label=exp_label,
+            device=device,
+            functional_dataset_fraction=0.01,
+        )
+
+        # exp_label = f"Task B: random {game_name} linear weight_autoencoder"
+        # logger.info(f"Running experiment: {exp_label}")
+        # test_downstream_task_b(game, predictor_type="linear", encoder_type="weight_autoencoder", device=device)
+        # exp_label = f"Task B: random {game_name} linear identity"
+        # logger.info(f"Running experiment: {exp_label}")
+        # test_downstream_task_b(game, predictor_type="linear", encoder_type="identity", device=device)
+
+    
+if __name__ == "__main__":
+    run_all()
+
+    # device = get_device_string()
+    # print("Using device:", device)
+    # game = pyspiel.load_game("kuhn_poker")
+    # test_downstream_task_a_with_neupl(game, predictor_type="linear", encoder_type="weight_autoencoder", device=device)
+    # test_downstream_task_a(game, predictor_type="linear", encoder_type="weight_autoencoder", device=device)
+    # test_downstream_task_b(game, predictor_type="linear", encoder_type="weight_autoencoder", device=device)

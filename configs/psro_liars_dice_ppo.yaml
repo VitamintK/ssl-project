@@ -6,21 +6,25 @@ inner_rl_agent:
   anneal_lr: false # there's an assert statement for this to be False
   clip_coef: 0.025
   clip_vloss: true
-  ent_coef: 0.1
+  # ent_coef: 0.1
+  ent_coef: 0.003
   gae: true
   gae_lambda: 0.95
   gamma: 0.99
   hidden_size: 256
-  learning_rate: 6.25e-05
+  # learning_rate: 6.25e-05
+  learning_rate: 1e-4
   max_grad_norm: 0.5
   norm_adv: true
-  num_envs: 8
-  num_minibatches: 1
-  num_steps: 256
+  # num_envs: 8
+  # num_minibatches: 1
+  num_minibatches: 4
+  num_steps: 256 # steps_per_batch
   target_kl: null
-  update_epochs: 8
+  # update_epochs: 8
+  update_epochs: 4
   vf_coef: 0.0625
-
+  device: 'cpu' # change this to 'cuda' or 'cpu' to change the device
   # batch_size: 8
   # discount_factor: 1.0
   # epsilon_decay_duration: 80000000
@@ -35,12 +39,14 @@ inner_rl_agent:
 meta_strategy_method: nash
 n_hidden_layers: 3
 number_policies_selected: 1
-number_training_episodes: 8000
-optimizer_str: adam
+number_training_episodes: 30000
+# number_training_episodes: 400
+# optimizer_str: adam
+optimizer_str: adamw
 oracle_type: ppo
 rectifier: ''
 self_play_proportion: 0.0
 sigma: 0.0
-sims_per_entry: 250
+sims_per_entry: 500
 symmetric_game: false
 training_strategy_selector: probabilistic
