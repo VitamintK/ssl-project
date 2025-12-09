@@ -116,12 +116,8 @@ class PayoffPredictor:
     def __init__(
         self,
         game,
-        # p1_agents: List[Policy],
-        # p2_agents: List[Policy],
         p1_policies: list[Policy],
         p2_policies: list[Policy],
-        # p1_encoder_fn: Callable,
-        # p2_encoder_fn: Callable,
         p1_embeddings: list[np.ndarray],
         p2_embeddings: list[np.ndarray],
         hidden_dims: List[int],
