@@ -20,5 +20,11 @@ results/**/*.pkl
 results/**/old/
 *.pth
 
+outputs/
+
 # Test files
 test_downstream_smoke.py
+*.zip
+min_final_expl_hparams/
+test.py
+scratch.py
