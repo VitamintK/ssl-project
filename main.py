@@ -63,19 +63,19 @@ def test_downstream_task_a(
 
     encoder_defaults = {
         "identity": {
-            "predictor_hidden_size": 256,
+            "ppo_agent_hidden_size": 256,
             "predictor_agent_count": 100,
             "encoder_hidden_size": None,
             "autoencoder_agent_count": 0,
         },
         "weight_autoencoder": {
-            "predictor_hidden_size": 256,
+            "ppo_agent_hidden_size": 256,
             "predictor_agent_count": 100,
             "encoder_hidden_size": 256,
             "autoencoder_agent_count": 100,
         },
         "functional_autoencoder": {
-            "predictor_hidden_size": 64,
+            "ppo_agent_hidden_size": 64,
             "predictor_agent_count": 100,
             "encoder_hidden_size": 64,
             "autoencoder_agent_count": 100,
@@ -86,7 +86,7 @@ def test_downstream_task_a(
         raise ValueError(f"Invalid encoder type: {encoder_type}")
 
     defaults = encoder_defaults[encoder_type]
-    predictor_hidden_size = defaults["predictor_hidden_size"]
+    ppo_agent_hidden_size = defaults["ppo_agent_hidden_size"]
     predictor_agent_count = defaults["predictor_agent_count"]
     encoder_agents_hidden_size = defaults["encoder_hidden_size"]
     autoencoder_agent_count = defaults["autoencoder_agent_count"]
@@ -165,7 +165,7 @@ def test_downstream_task_a(
                 info_state_size,
                 device,
                 layer_init,
-                predictor_hidden_size,
+                ppo_agent_hidden_size,
             )
             for _ in range(predictor_agent_count)
         ]
