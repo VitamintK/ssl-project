@@ -13,8 +13,6 @@ from utils import PPONeuplAgentPolicy, get_device_string
 def run_psro(game_name: str = 'kuhn_poker'):
     os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE' # Fix for MacOS. Claude told me this is safe.
     game = pyspiel.load_game(game_name)
-    # num_actions = game.num_distinct_actions()
-    # observation_shape = game.information_state_tensor_shape()
     config_path = 'configs/psro_liars_dice_ppo.yaml'
     # config_path = 'configs/psro_liars_dice_best_hparams_dqn.yaml'
     algorithm_config = OmegaConf.load(config_path)
@@ -93,9 +91,7 @@ def load_ppo_agents_from_neupl(
     game = pyspiel.load_game(game_short_name)
     info_state_size = game.information_state_tensor_shape()
     num_actions = game.num_distinct_actions()
-    ppo_agents = []
     import glob
-
     # List the most recent 10 subdirectories in base_dir
     subdirs = [d for d in base_dir.iterdir() if d.is_dir()]
     # Sort by modification time, most recent first

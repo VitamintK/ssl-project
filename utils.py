@@ -1,5 +1,5 @@
 import random
-from typing import Optional, Union
+from typing import Optional
 from iig_rl_benchmark.algorithms.ppo import ppo
 import numpy as np
 import torch

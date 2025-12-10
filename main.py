@@ -248,8 +248,6 @@ def test_downstream_task_a_with_neupl(
         hidden_dims = []
     else:
         raise ValueError(f"Invalid predictor type: {predictor_type}")
-    hidden_dims = [64]
-
 
     predictor = PayoffPredictor(
         game=game,
@@ -649,6 +647,6 @@ if __name__ == "__main__":
     # device = get_device_string()
     # print("Using device:", device)
     # game = pyspiel.load_game("kuhn_poker")
-    # test_downstream_task_a_with_neupl(game, predictor_type="linear", encoder_type="weight_autoencoder", device=device)
-    # test_downstream_task_a(game, predictor_type="linear", encoder_type="weight_autoencoder", device=device)
-    # test_downstream_task_b(game, predictor_type="linear", encoder_type="weight_autoencoder", device=device)
+    # test_downstream_task_a_with_neupl(game, predictor_type="linear", device=device)
+    # test_downstream_task_a(game, predictor_type="linear", device=device)
+    # test_downstream_task_b(game, predictor_type="linear", device=device)

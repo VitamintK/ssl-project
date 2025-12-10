@@ -325,15 +325,10 @@ class PayoffPredictor:
         """
         self.model.eval()
         with torch.no_grad():
-            # Encode both agents
-            # p1_embedding = self.p1_encoder_fn(p1_agent)
             if isinstance(p1_embedding, torch.Tensor):
                 p1_embedding = p1_embedding.detach().cpu().numpy()
-
-            # p2_embedding = self.p2_encoder_fn(p2_agent)
             if isinstance(p2_embedding, torch.Tensor):
                 p2_embedding = p2_embedding.detach().cpu().numpy()
-
             # Concatenate embeddings
             concat_embedding = np.concatenate([p1_embedding, p2_embedding])
             embedding_tensor = torch.FloatTensor(concat_embedding).unsqueeze(0).to(self.device)
