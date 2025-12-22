@@ -18,13 +18,14 @@ import pyspiel
 from open_spiel.python import policy as policy_lib
 
 from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
-from utils import get_device_string, make_diverse_random_kuhn_poker_layer_init
+from utils import PPOAgentPolicy, get_device_string, make_diverse_random_kuhn_poker_layer_init
 from downstream import PayoffPredictor, StatePayoffPredictor, set_seed, sample_random_states
 from trajectory_encoder import (
     TrajectoryEncoderConfig,
     TrajectoryEncoderTrainer,
     TrajectoryEncoderAdapter,
 )
+from psro import load_ppo_agents_from_psro, load_ppo_agents_from_single_psro_folder
 
 
 logger = logging.getLogger(__name__)
@@ -38,12 +39,13 @@ handler.setFormatter(logging.Formatter('%(message)s'))
 logger.addHandler(handler)
 
 
-def load_trajectory_encoder_from_checkpoint(checkpoint_path: str, game: pyspiel.Game, device: str = "cpu"):
+def load_trajectory_encoder_from_checkpoint(checkpoint_path: str, game: pyspiel.Game, policies: Optional[list[PPOAgent]] = None, device: str = "cpu"):
     """Load a pre-trained trajectory encoder from a checkpoint file.
 
     Args:
         checkpoint_path: Path to the checkpoint file
         game: OpenSpiel game instance
+        policies: Optional list of policies to use as opponent pool (should match training distribution)
         device: Device to load model on
 
     Returns:
@@ -76,7 +78,7 @@ def load_trajectory_encoder_from_checkpoint(checkpoint_path: str, game: pyspiel.
     # Create adapter and set normalization stats
     # NOTE: Keep normalization stats on CPU because normalize_transitions operates on CPU
     # The trajectory is moved to device only after normalization
-    adapter = TrajectoryEncoderAdapter(model, game, config)
+    adapter = TrajectoryEncoderAdapter(model, game, config, policies=policies)
     state_min = checkpoint['state_min'].cpu() if isinstance(checkpoint['state_min'], torch.Tensor) else checkpoint['state_min']
     state_max = checkpoint['state_max'].cpu() if isinstance(checkpoint['state_max'], torch.Tensor) else checkpoint['state_max']
     adapter.set_normalization_stats(state_min, state_max)
@@ -84,6 +86,10 @@ def load_trajectory_encoder_from_checkpoint(checkpoint_path: str, game: pyspiel.
     logger.info(f"Loaded checkpoint from {checkpoint_path}")
     logger.info(f"Training history: Best epoch {checkpoint['history']['best_epoch']}, "
                 f"Best val loss: {checkpoint['history'].get('best_val_loss', 'N/A')}")
+    if policies is not None:
+        logger.info(f"Using {len(policies)} policies as opponent pool for consistent trajectory generation")
+    else:
+        logger.warning("No policies provided - will use uniform random opponent (may cause distribution shift!)")
 
     return model, adapter, config
 
@@ -122,7 +128,7 @@ def test_downstream_task_a_with_trajectory_encoder(
         PPO_AGENT_HIDDEN_SIZE = 256
         layer_init = make_diverse_random_kuhn_poker_layer_init(game)
 
-        NUM_AGENTS_AUTOENCODE = len(autoencoder_ppo_agents) if autoencoder_ppo_agents is not None else 50
+        NUM_AGENTS_AUTOENCODE = len(autoencoder_ppo_agents) if autoencoder_ppo_agents is not None else 500
         if autoencoder_ppo_agents is None:
             autoencoder_ppo_agents = [
                 PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE)
@@ -152,8 +158,8 @@ def test_downstream_task_a_with_trajectory_encoder(
         logger.info(f"Trajectory encoder trained. Final loss: {history[-1]:.4f}")
 
         # Create adapter and get encoder function
-        adapter = TrajectoryEncoderAdapter(model, game, traj_config)
-        adapter.set_normalization_stats(trainer.dataset.state_min, trainer.dataset.state_max)
+        adapter = TrajectoryEncoderAdapter(model, game, traj_config, policies=autoencoder_ppo_agents)
+        adapter.set_normalization_stats(trainer.train_dataset.state_min, trainer.train_dataset.state_max)
         encoder_fn = adapter.get_encoder(device=device)
 
     # Set up downstream task
@@ -164,22 +170,19 @@ def test_downstream_task_a_with_trajectory_encoder(
     else:
         raise ValueError(f"Invalid predictor type: {predictor_type}")
 
-    NUM_AGENTS_DOWNSTREAM = len(downstream_task_ppo_agents) if downstream_task_ppo_agents is not None else 50
+    NUM_AGENTS_DOWNSTREAM = len(downstream_task_ppo_agents) if downstream_task_ppo_agents is not None else 500
     if downstream_task_ppo_agents is None:
         downstream_task_ppo_agents = [
             PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE)
             for _ in range(NUM_AGENTS_DOWNSTREAM)
         ]
 
-    # Dummy encoder for fixed P2 (uniform random)
-    p2_encoder_fn = lambda x: np.array([0])
-
     predictor = PayoffPredictor(
         game=game,
-        p1_agents=downstream_task_ppo_agents,
-        p2_agents=[opponent_policy],
-        p1_encoder_fn=encoder_fn,
-        p2_encoder_fn=p2_encoder_fn,
+        p1_policies=[PPOAgentPolicy(game, agent, 0, False) for agent in downstream_task_ppo_agents],
+        p2_policies=[opponent_policy],
+        p1_embeddings=[encoder_fn(agent).detach().cpu().numpy() for agent in downstream_task_ppo_agents],
+        p2_embeddings=[np.array([0])],
         hidden_dims=hidden_dims,
         dropout=0.2,
         device="cpu"
@@ -201,13 +204,14 @@ def test_downstream_task_a_with_trajectory_encoder(
     logger.info(f"MSE: {val_metrics['mse']:.6f}")
     logger.info(f"MAE: {val_metrics['mae']:.6f}")
 
-    # Baseline: predict mean for everything
+    # Baseline: predict mean of training set for everything
+    train_payoffs = predictor.ground_truth_payoffs[predictor.train_indices]
     val_payoffs = predictor.ground_truth_payoffs[predictor.val_indices]
-    mean_payoff = np.mean(val_payoffs)
+    mean_payoff = np.mean(train_payoffs)
     baseline_mse = np.mean((val_payoffs - mean_payoff) ** 2)
     baseline_mae = np.mean(np.abs(val_payoffs - mean_payoff))
 
-    logger.info(f"\nBaseline (constant mean prediction: {mean_payoff:.6f}):")
+    logger.info(f"\nBaseline (constant mean prediction from training set: {mean_payoff:.6f}):")
     logger.info(f"MSE: {baseline_mse:.6f}")
     logger.info(f"MAE: {baseline_mae:.6f}")
     logger.info(f"\nModel improvement over baseline:")
@@ -215,11 +219,11 @@ def test_downstream_task_a_with_trajectory_encoder(
     logger.info(f"MAE reduction: {(1 - val_metrics['mae']/baseline_mae)*100:.2f}%")
 
     # Evaluate on training set for comparison
-    logger.info("\nEvaluating model on training set...")
-    train_metrics = predictor.evaluate(eval_set="train")
-    logger.info(f"\nTraining Set Results:")
-    logger.info(f"MSE: {train_metrics['mse']:.6f}")
-    logger.info(f"MAE: {train_metrics['mae']:.6f}")
+    # logger.info("\nEvaluating model on training set...")
+    # train_metrics = predictor.evaluate(eval_set="train")
+    # logger.info(f"\nTraining Set Results:")
+    # logger.info(f"MSE: {train_metrics['mse']:.6f}")
+    # logger.info(f"MAE: {train_metrics['mae']:.6f}")
 
     # Save results
     results_dir = Path("results") / "task_a_trajectory"
@@ -228,7 +232,7 @@ def test_downstream_task_a_with_trajectory_encoder(
     predictor.save(str(save_path))
     logger.info(f"Saved predictor to {save_path}")
 
-    return predictor, history, val_metrics, train_metrics
+    return predictor, history, val_metrics
 
 
 def test_downstream_task_b_with_trajectory_encoder(
@@ -263,7 +267,7 @@ def test_downstream_task_b_with_trajectory_encoder(
         PPO_AGENT_HIDDEN_SIZE = 256
         layer_init = make_diverse_random_kuhn_poker_layer_init(game)
 
-        NUM_AGENTS_AUTOENCODE = len(autoencoder_ppo_agents) if autoencoder_ppo_agents is not None else 50
+        NUM_AGENTS_AUTOENCODE = len(autoencoder_ppo_agents) if autoencoder_ppo_agents is not None else 500
         if autoencoder_ppo_agents is None:
             autoencoder_ppo_agents = [
                 PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE)
@@ -293,8 +297,8 @@ def test_downstream_task_b_with_trajectory_encoder(
         logger.info(f"Trajectory encoder trained. Final loss: {history[-1]:.4f}")
 
         # Create adapter and get encoder function (same for both players)
-        adapter = TrajectoryEncoderAdapter(model, game, traj_config)
-        adapter.set_normalization_stats(trainer.dataset.state_min, trainer.dataset.state_max)
+        adapter = TrajectoryEncoderAdapter(model, game, traj_config, policies=autoencoder_ppo_agents)
+        adapter.set_normalization_stats(trainer.train_dataset.state_min, trainer.train_dataset.state_max)
         encoder_fn = adapter.get_encoder(device=device)
 
     # Set up downstream task
@@ -305,7 +309,7 @@ def test_downstream_task_b_with_trajectory_encoder(
     else:
         raise ValueError(f"Invalid predictor type: {predictor_type}")
 
-    NUM_AGENTS_DOWNSTREAM = len(downstream_task_ppo_agents) if downstream_task_ppo_agents is not None else 50
+    NUM_AGENTS_DOWNSTREAM = len(downstream_task_ppo_agents) if downstream_task_ppo_agents is not None else 500
     if downstream_task_ppo_agents is None:
         downstream_task_ppo_agents = [
             PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE)
@@ -314,10 +318,10 @@ def test_downstream_task_b_with_trajectory_encoder(
 
     predictor = PayoffPredictor(
         game=game,
-        p1_agents=downstream_task_ppo_agents,
-        p2_agents=downstream_task_ppo_agents,
-        p1_encoder_fn=encoder_fn,
-        p2_encoder_fn=encoder_fn,
+        p1_policies=[PPOAgentPolicy(game, agent, 0, False) for agent in downstream_task_ppo_agents],
+        p2_policies=[PPOAgentPolicy(game, agent, 1, False) for agent in downstream_task_ppo_agents],
+        p1_embeddings=[encoder_fn(agent).detach().cpu().numpy() for agent in downstream_task_ppo_agents],
+        p2_embeddings=[encoder_fn(agent).detach().cpu().numpy() for agent in downstream_task_ppo_agents],
         hidden_dims=hidden_dims,
         dropout=0.2,
         device="cpu"
@@ -339,13 +343,14 @@ def test_downstream_task_b_with_trajectory_encoder(
     logger.info(f"MSE: {val_metrics['mse']:.6f}")
     logger.info(f"MAE: {val_metrics['mae']:.6f}")
 
-    # Baseline: predict mean for everything
+    # Baseline: predict mean of training set for everything
+    train_payoffs = predictor.ground_truth_payoffs[predictor.train_indices]
     val_payoffs = predictor.ground_truth_payoffs[predictor.val_indices]
-    mean_payoff = np.mean(val_payoffs)
+    mean_payoff = np.mean(train_payoffs)
     baseline_mse = np.mean((val_payoffs - mean_payoff) ** 2)
     baseline_mae = np.mean(np.abs(val_payoffs - mean_payoff))
 
-    logger.info(f"\nBaseline (constant mean prediction: {mean_payoff:.6f}):")
+    logger.info(f"\nBaseline (constant mean prediction from training set: {mean_payoff:.6f}):")
     logger.info(f"MSE: {baseline_mse:.6f}")
     logger.info(f"MAE: {baseline_mae:.6f}")
     logger.info(f"\nModel improvement over baseline:")
@@ -353,11 +358,11 @@ def test_downstream_task_b_with_trajectory_encoder(
     logger.info(f"MAE reduction: {(1 - val_metrics['mae']/baseline_mae)*100:.2f}%")
 
     # Evaluate on training set for comparison
-    logger.info("\nEvaluating model on training set...")
-    train_metrics = predictor.evaluate(eval_set="train")
-    logger.info(f"\nTraining Set Results:")
-    logger.info(f"MSE: {train_metrics['mse']:.6f}")
-    logger.info(f"MAE: {train_metrics['mae']:.6f}")
+    # logger.info("\nEvaluating model on training set...")
+    # train_metrics = predictor.evaluate(eval_set="train")
+    # logger.info(f"\nTraining Set Results:")
+    # logger.info(f"MSE: {train_metrics['mse']:.6f}")
+    # logger.info(f"MAE: {train_metrics['mae']:.6f}")
 
     # Save results
     results_dir = Path("results") / "task_b_trajectory"
@@ -366,7 +371,7 @@ def test_downstream_task_b_with_trajectory_encoder(
     predictor.save(str(save_path))
     logger.info(f"Saved predictor to {save_path}")
 
-    return predictor, history, val_metrics, train_metrics
+    return predictor, history, val_metrics
 
 
 def test_downstream_task_c_with_trajectory_encoder(
@@ -401,7 +406,7 @@ def test_downstream_task_c_with_trajectory_encoder(
         PPO_AGENT_HIDDEN_SIZE = 256
         layer_init = make_diverse_random_kuhn_poker_layer_init(game)
 
-        NUM_AGENTS_AUTOENCODE = len(autoencoder_ppo_agents) if autoencoder_ppo_agents is not None else 50
+        NUM_AGENTS_AUTOENCODE = len(autoencoder_ppo_agents) if autoencoder_ppo_agents is not None else 500
         if autoencoder_ppo_agents is None:
             autoencoder_ppo_agents = [
                 PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE)
@@ -431,8 +436,8 @@ def test_downstream_task_c_with_trajectory_encoder(
         logger.info(f"Trajectory encoder trained. Final loss: {history[-1]:.4f}")
 
         # Create adapter and get encoder function (same for both players)
-        adapter = TrajectoryEncoderAdapter(model, game, traj_config)
-        adapter.set_normalization_stats(trainer.dataset.state_min, trainer.dataset.state_max)
+        adapter = TrajectoryEncoderAdapter(model, game, traj_config, policies=autoencoder_ppo_agents)
+        adapter.set_normalization_stats(trainer.train_dataset.state_min, trainer.train_dataset.state_max)
         encoder_fn = adapter.get_encoder(device=device)
 
     # Set up downstream task
@@ -443,7 +448,7 @@ def test_downstream_task_c_with_trajectory_encoder(
     else:
         raise ValueError(f"Invalid predictor type: {predictor_type}")
 
-    NUM_AGENTS_DOWNSTREAM = len(downstream_task_ppo_agents) if downstream_task_ppo_agents is not None else 50
+    NUM_AGENTS_DOWNSTREAM = len(downstream_task_ppo_agents) if downstream_task_ppo_agents is not None else 500
     if downstream_task_ppo_agents is None:
         downstream_task_ppo_agents = [
             PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE)
@@ -484,13 +489,14 @@ def test_downstream_task_c_with_trajectory_encoder(
     logger.info(f"MSE: {val_metrics['mse']:.6f}")
     logger.info(f"MAE: {val_metrics['mae']:.6f}")
 
-    # Baseline: predict mean for everything
+    # Baseline: predict mean of training set for everything
+    train_payoffs = predictor.ground_truth_payoffs[predictor.train_indices]
     val_payoffs = predictor.ground_truth_payoffs[predictor.val_indices]
-    mean_payoff = np.mean(val_payoffs)
+    mean_payoff = np.mean(train_payoffs)
     baseline_mse = np.mean((val_payoffs - mean_payoff) ** 2)
     baseline_mae = np.mean(np.abs(val_payoffs - mean_payoff))
 
-    logger.info(f"\nBaseline (constant mean prediction: {mean_payoff:.6f}):")
+    logger.info(f"\nBaseline (constant mean prediction from training set: {mean_payoff:.6f}):")
     logger.info(f"MSE: {baseline_mse:.6f}")
     logger.info(f"MAE: {baseline_mae:.6f}")
     logger.info(f"\nModel improvement over baseline:")
@@ -498,11 +504,11 @@ def test_downstream_task_c_with_trajectory_encoder(
     logger.info(f"MAE reduction: {(1 - val_metrics['mae']/baseline_mae)*100:.2f}%")
 
     # Evaluate on training set for comparison
-    logger.info("\nEvaluating model on training set...")
-    train_metrics = predictor.evaluate(eval_set="train")
-    logger.info(f"\nTraining Set Results:")
-    logger.info(f"MSE: {train_metrics['mse']:.6f}")
-    logger.info(f"MAE: {train_metrics['mae']:.6f}")
+    # logger.info("\nEvaluating model on training set...")
+    # train_metrics = predictor.evaluate(eval_set="train")
+    # logger.info(f"\nTraining Set Results:")
+    # logger.info(f"MSE: {train_metrics['mse']:.6f}")
+    # logger.info(f"MAE: {train_metrics['mae']:.6f}")
 
     # Save results
     results_dir = Path("results") / "task_c_trajectory"
@@ -511,10 +517,14 @@ def test_downstream_task_c_with_trajectory_encoder(
     predictor.save(str(save_path))
     logger.info(f"Saved predictor to {save_path}")
 
-    return predictor, history, val_metrics, train_metrics
+    return predictor, history, val_metrics
 
 
 if __name__ == "__main__":
+    # Configuration
+    USE_PSRO_AGENTS = False  # Set to True to use PSRO agents instead of random agents
+    PSRO_HIDDEN_SIZE = 256   # Hidden size for PSRO agents (if USE_PSRO_AGENTS=True)
+
     # Set seed for reproducibility
     seed = 42
     set_seed(seed)
@@ -526,25 +536,52 @@ if __name__ == "__main__":
     game_name = "kuhn_poker"
     game = pyspiel.load_game(game_name)
 
-    # Load pre-trained trajectory encoder
-    checkpoint_path = "checkpoints/trajectory_encoder_kuhn_random_full.pt"
-    logger.info(f"\nLoading pre-trained encoder from {checkpoint_path}...")
-    pretrained_encoder = load_trajectory_encoder_from_checkpoint(checkpoint_path, game, device)
+    # Load opponent pool for encoder (should match what encoder was trained on)
+    if USE_PSRO_AGENTS:
+        logger.info(f"\nLoading PSRO policies for encoder opponent pool...")
+        encoder_opponent_pool = load_ppo_agents_from_single_psro_folder(
+            game_short_name=game_name,
+            hidden_size=PSRO_HIDDEN_SIZE,
+            shuffle=True,
+            player_id=0,
+            folder_selection='newest'
+        )
+        logger.info(f"Loaded {len(encoder_opponent_pool)} PSRO policies for opponent pool")
+    else:
+        logger.info(f"\nUsing uniform random opponent pool (encoder trained on random agents)")
+        encoder_opponent_pool = None  # Will use uniform random opponent
 
-    # Create random agents for downstream tasks
-    logger.info("\nCreating random agents for downstream tasks...")
+    # Load pre-trained trajectory encoder
+    checkpoint_path = "checkpoints/trajectory_encoder_kuhn_random_improved_500.pt"
+    logger.info(f"\nLoading pre-trained encoder from {checkpoint_path}...")
+    pretrained_encoder = load_trajectory_encoder_from_checkpoint(
+        checkpoint_path,
+        game,
+        policies=encoder_opponent_pool,  # Pass policies for consistent opponent distribution
+        device=device
+    )
+
+    # Create or load agents for downstream tasks
     info_state_size = game.information_state_tensor_shape()
     num_actions = game.num_distinct_actions()
     PPO_AGENT_HIDDEN_SIZE = 256
     layer_init = make_diverse_random_kuhn_poker_layer_init(game)
 
-    # Create 50 random agents for downstream tasks
-    downstream_agents = [
-        PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE)
-        for _ in range(50)
-    ]
-
-    logger.info(f"Created {len(downstream_agents)} agents for downstream tasks")
+    if USE_PSRO_AGENTS:
+        # Load PSRO agents using the built-in function
+        logger.info(f"\nLoading PSRO agents with hidden_size={PSRO_HIDDEN_SIZE}...")
+        all_psro_agents = load_ppo_agents_from_single_psro_folder(game_short_name=game_name, hidden_size=PSRO_HIDDEN_SIZE, shuffle=True, player_id=0, folder_selection=0)
+        logger.info(f"Loaded {len(all_psro_agents)} PSRO agents")
+        downstream_agents = all_psro_agents[:120] if len(all_psro_agents) >= 50 else all_psro_agents
+        logger.info(f"Using {len(downstream_agents)} PSRO agents for downstream tasks")
+    else:
+        # Create random agents for downstream tasks
+        logger.info("\nCreating random agents for downstream tasks...")
+        downstream_agents = [
+            PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE)
+            for _ in range(500)
+        ]
+        logger.info(f"Created {len(downstream_agents)} random agents for downstream tasks")
 
     # Test Task A
     logger.info("\n" + "="*80)

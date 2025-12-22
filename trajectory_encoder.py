@@ -404,7 +404,7 @@ class TrajectoryContrastiveDataset(Dataset):
         num_transitions: int = 200,
         normalize: bool = True,
         device: str = "cpu",
-        trajectories_per_policy: int = 10,
+        trajectories_per_policy: int = 50,
     ):
         self.game = game
         self.policies = policies
@@ -781,10 +781,12 @@ class TrajectoryEncoderAdapter:
         model: TrajectoryEncoder,
         game: pyspiel.Game,
         config: TrajectoryEncoderConfig,
+        policies: Optional[List[PPOAgent]] = None,
     ):
         self.model = model
         self.game = game
         self.config = config
+        self.policies = policies  # Store policies for opponent pool
 
         # Store normalization statistics from training
         self.state_min = None
@@ -811,12 +813,13 @@ class TrajectoryEncoderAdapter:
         def encoder_fn(policy: PPOAgent) -> torch.Tensor:
             """Encode a policy into a behavioral embedding."""
             with torch.no_grad():
-                # Collect trajectory
+                # Collect trajectory using same opponent distribution as training
                 transitions = collect_trajectory_transitions(
                     self.game,
                     policy,
                     player_id=0,
                     num_transitions=self.config.num_transitions,
+                    opponent_pool=self.policies,  # Use same opponent distribution as training
                 )
 
                 # Normalize if needed
@@ -883,7 +886,7 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     from utils import make_diverse_random_kuhn_poker_layer_init
-    from psro import load_ppo_agents_from_psro
+    from psro import load_ppo_agents_from_single_psro_folder, load_ppo_agents_from_psro
 
     args = parse_args()
 
@@ -903,7 +906,7 @@ if __name__ == "__main__":
     # Create or load PPO agents
     if args.use_psro:
         print(f"\nLoading PSRO agents (hidden_size={args.ppo_hidden_size})...")
-        ppo_agents = load_ppo_agents_from_psro(hidden_size=args.ppo_hidden_size, shuffle=args.shuffle_psro)
+        ppo_agents = load_ppo_agents_from_psro(game_short_name=args.game, hidden_size=args.ppo_hidden_size, shuffle=args.shuffle_psro, player_id=0)
         print(f"Loaded {len(ppo_agents)} PSRO agents")
 
         # Optionally limit to num_agents if specified and less than available
