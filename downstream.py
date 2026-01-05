@@ -450,14 +450,32 @@ class StatePayoffPredictor(PayoffPredictor):
         self.num_states_per_pair = num_states_per_pair
         self.states = None
         self.state_tensors = None
+        self.p1_agents = p1_agents
+        self.p2_agents = p2_agents
+        self.p1_encoder_fn = p1_encoder_fn
+        self.p2_encoder_fn = p2_encoder_fn
 
-        # Override the embedding_dim calculation after encoding states
+        # Encode agents to get embeddings
+        print("Encoding P1 agents...")
+        p1_embeddings = [p1_encoder_fn(agent).cpu().numpy() for agent in tqdm(p1_agents)]
+        p1_embeddings = np.array(p1_embeddings)
+
+        print("Encoding P2 agents...")
+        p2_embeddings = [p2_encoder_fn(agent).cpu().numpy() for agent in tqdm(p2_agents)]
+        p2_embeddings = np.array(p2_embeddings)
+
+        # Convert agents to policies
+        from utils import PPOAgentPolicy
+        p1_policies = [PPOAgentPolicy(game, agent, 0, use_observation=False) for agent in p1_agents]
+        p2_policies = [PPOAgentPolicy(game, agent, 1, use_observation=False) for agent in p2_agents]
+
+        # Call parent init with embeddings and policies
         super().__init__(
             game=game,
-            p1_agents=p1_agents,
-            p2_agents=p2_agents,
-            p1_encoder_fn=p1_encoder_fn,
-            p2_encoder_fn=p2_encoder_fn,
+            p1_policies=p1_policies,
+            p2_policies=p2_policies,
+            p1_embeddings=p1_embeddings,
+            p2_embeddings=p2_embeddings,
             hidden_dims=hidden_dims,
             dropout=dropout,
             device=device

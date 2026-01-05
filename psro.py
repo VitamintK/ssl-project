@@ -6,9 +6,20 @@ import uuid
 from omegaconf import OmegaConf
 import pyspiel
 import torch
+import numpy as np
 from iig_rl_benchmark.algorithms.psro import run_psro as iig_run_psro
 from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent, PPOConditionedOnPolicyRepresentationAgent
 from utils import PPONeuplAgentPolicy, get_device_string
+from typing import Union
+
+def set_seed(seed):
+    """Set random seeds for reproducibility."""
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+    np.random.seed(seed)
+    random.seed(seed)
 
 def run_psro(game_name: str = 'kuhn_poker'):
     os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE' # Fix for MacOS. Claude told me this is safe.
@@ -57,6 +68,7 @@ def run_neupl(game_name: str = 'kuhn_poker'):
 
 def load_ppo_agents_from_psro(
         game_short_name: str = 'kuhn_poker',
+        player_id: Union[int, None] = None,
         hidden_size: int = 512,
         shuffle: bool = True,
 ):
@@ -68,7 +80,8 @@ def load_ppo_agents_from_psro(
     ppo_agents = []
     for subdir in sorted(base_dir.iterdir()):
         if subdir.is_dir():
-            files = list(subdir.glob("*policy*.pt"))
+            glob = "policy*.pt" if player_id is None else f"policy{player_id}_ckpt*.pt"
+            files = list(subdir.glob(glob))
             for file in files:
                 policy = torch.load(file)
                 agent = PPOAgent(num_actions, info_state_size, 'cpu', hidden_size=hidden_size)
@@ -78,6 +91,80 @@ def load_ppo_agents_from_psro(
         random.shuffle(ppo_agents)
     print(f"Loaded {len(ppo_agents)} PPO agents from {PATH}")
     return ppo_agents
+
+
+def load_ppo_agents_from_single_psro_folder(
+        game_short_name: str = 'kuhn_poker',
+        player_id: Union[int, None] = None,
+        hidden_size: int = 512,
+        shuffle: bool = True,
+        folder_selection: str = 'oldest',  # 'newest', 'oldest', or specific index
+        max_agents: int = None,  # Maximum number of agents to load (None = all)
+):
+    """
+    Load PPO agents from a single PSRO date folder.
+
+    Args:
+        game_short_name: Name of the game
+        player_id: Which player's policies to load (None = both players)
+        hidden_size: Hidden size of PPO agents
+        shuffle: Whether to shuffle agents after loading
+        folder_selection: Which folder to select - 'newest', 'oldest', or integer index
+        max_agents: Maximum number of agents to return (None = all agents from folder)
+
+    Returns:
+        List of PPOAgent objects from the selected folder
+    """
+    PATH = f"results/test/psro/ppo/hs{hidden_size}/{game_short_name}"
+    base_dir = Path(PATH)
+    game = pyspiel.load_game(game_short_name)
+    info_state_size = game.information_state_tensor_shape()
+    num_actions = game.num_distinct_actions()
+
+    # Get all subdirectories
+    subdirs = sorted([d for d in base_dir.iterdir() if d.is_dir()])
+
+    if not subdirs:
+        raise ValueError(f"No subdirectories found in {PATH}")
+
+    # Select the folder based on folder_selection parameter
+    if folder_selection == 'newest':
+        selected_subdir = subdirs[-1]  # Last in sorted order (most recent date)
+    elif folder_selection == 'oldest':
+        selected_subdir = subdirs[0]   # First in sorted order (oldest date)
+    elif isinstance(folder_selection, int):
+        if folder_selection < 0 or folder_selection >= len(subdirs):
+            raise ValueError(f"Folder index {folder_selection} out of range (0-{len(subdirs)-1})")
+        selected_subdir = subdirs[folder_selection]
+    else:
+        raise ValueError(f"Invalid folder_selection: {folder_selection}. Use 'newest', 'oldest', or integer index")
+
+    print(f"Selected folder: {selected_subdir.name}")
+
+    # Load all agents from the selected folder
+    ppo_agents = []
+    glob_pattern = "policy*.pt" if player_id is None else f"policy{player_id}_ckpt*.pt"
+    files = list(selected_subdir.glob(glob_pattern))
+
+    for file in files:
+        policy = torch.load(file)
+        agent = PPOAgent(num_actions, info_state_size, 'cpu', hidden_size=hidden_size)
+        agent.actor.load_state_dict(policy)
+        ppo_agents.append(agent)
+
+    print(f"Loaded {len(ppo_agents)} PPO agents from {selected_subdir}")
+
+    # Shuffle if requested
+    if shuffle:
+        random.shuffle(ppo_agents)
+
+    # Limit to max_agents if specified
+    if max_agents is not None and max_agents < len(ppo_agents):
+        ppo_agents = ppo_agents[:max_agents]
+        print(f"Limited to {max_agents} agents")
+
+    return ppo_agents
+
 
 def load_ppo_agents_from_neupl(
         game_short_name: str = 'kuhn_poker',
