@@ -2,6 +2,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 import random
+from typing import Optional, Union
 import uuid
 from omegaconf import OmegaConf
 import pyspiel
@@ -44,7 +45,7 @@ def run_psro(game_name: str = 'kuhn_poker'):
     runner = iig_run_psro.RunPSRO(args, game, is_neupl=False)
     runner.run()
 
-def run_neupl(game_name: str = 'kuhn_poker'):
+def run_neupl(game_name: str = 'kuhn_poker', use_randall_loss=False):
     os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE' # Fix for MacOS. Claude told me this is safe.
     game = pyspiel.load_game(game_name)
     config_path = 'configs/neupl.yaml'
@@ -53,6 +54,7 @@ def run_neupl(game_name: str = 'kuhn_poker'):
     args.algorithm = algorithm_config
     args.algorithm.training_strategy_selector = 'exhaustive'
     args.algorithm.number_policies_selected = -1
+    args.algorithm.use_randall_loss = use_randall_loss
     args.game = game_name
     time_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
     random_str = uuid.uuid4().hex[:3]
@@ -168,9 +170,11 @@ def load_ppo_agents_from_single_psro_folder(
 
 def load_ppo_agents_from_neupl(
         game_short_name: str = 'kuhn_poker',
+        use_randall_loss: bool = False,
         hidden_size: int = 512,
         policy_embedding_size: int = 64,
-        shuffle: bool = True,
+        # shuffle: bool = True,
+        dir_name: Optional[str] = None,
 ):
     """loads a single neupl checkpoint."""
     PATH = f"results/test/neupl/ppo/hs{hidden_size}/{game_short_name}"
@@ -178,46 +182,85 @@ def load_ppo_agents_from_neupl(
     game = pyspiel.load_game(game_short_name)
     info_state_size = game.information_state_tensor_shape()
     num_actions = game.num_distinct_actions()
-    import glob
-    # List the most recent 10 subdirectories in base_dir
-    subdirs = [d for d in base_dir.iterdir() if d.is_dir()]
-    # Sort by modification time, most recent first
-    subdirs = sorted(subdirs, key=lambda d: d.stat().st_mtime, reverse=True)
-    recent_subdirs = subdirs[:10]
-    dir_info = []
-    print("Most recent 10 directories and .pt file counts:")
-    for idx, subdir in enumerate(recent_subdirs):
-        pt_files = list(subdir.glob("*.pt"))
-        dir_info.append((subdir, len(pt_files)))
-        print(f"[{idx}]: {subdir.name} - {len(pt_files)} .pt files")
-
-    selected_idx = None
-    while selected_idx is None:
-        try:
-            user_input = input("Select the directory to load by entering its index (0-9): ").strip()
-            i = int(user_input)
-            if 0 <= i < len(dir_info):
-                selected_idx = i
+    if dir_name is None:
+        import glob
+        # List the most recent 10 subdirectories in base_dir
+        subdirs = [d for d in base_dir.iterdir() if d.is_dir()]
+        # Sort by modification time, most recent first
+        subdirs = sorted(subdirs, key=lambda d: d.stat().st_mtime, reverse=True)
+        # Filter subdirs by use_randall_loss if use_randall_loss is not None
+        filtered_subdirs = []
+        for subdir in subdirs:
+            config_path = subdir / "config.json"
+            if config_path.exists():
+                try:
+                    import json
+                    with open(config_path, "r") as f:
+                        config = json.load(f)
+                    config_value = config.get("use_randall_loss")
+                    # If argument is None, show all. Otherwise must match exactly.
+                    if use_randall_loss is None or config_value == use_randall_loss:
+                        filtered_subdirs.append(subdir)
+                except Exception as e:
+                    print(f"Warning: Failed to parse {config_path}: {e}")
+                    # If the config can't be parsed or missing key, skip if filtering, else include
+                    if use_randall_loss is None:
+                        filtered_subdirs.append(subdir)
             else:
-                print("Invalid index. Try again.")
-        except Exception:
-            print("Invalid input. Enter an integer between 0 and 9.")
+                # If there's no config.json, include if not filtering, else skip
+                if use_randall_loss is None:
+                    filtered_subdirs.append(subdir)
+        subdirs = filtered_subdirs
 
-    chosen_subdir = dir_info[selected_idx][0]
-    print(f"Loading from directory: {chosen_subdir}")
+        recent_subdirs = subdirs[:10]
+        dir_info = []
+        print("Most recent 10 directories and .pt file counts:")
+        for idx, subdir in enumerate(recent_subdirs):
+            pt_files = list(subdir.glob("*.pt"))
+            dir_info.append((subdir, len(pt_files)))
+            print(f"[{idx}]: {subdir.name} - {len(pt_files)} .pt files")
 
-    pt0 = max(chosen_subdir.glob("policy0_ckpt*.pt"))
-    pt1 = max(chosen_subdir.glob("policy1_ckpt*.pt"))
+        selected_idx = None
+        while selected_idx is None:
+            try:
+                user_input = input("Select the directory to load by entering its index (0-9): ").strip()
+                i = int(user_input)
+                if 0 <= i < len(dir_info):
+                    selected_idx = i
+                else:
+                    print("Invalid index. Try again.")
+            except Exception:
+                print("Invalid input. Enter an integer between 0 and 9.")
+
+        dir_name = dir_info[selected_idx][0]
+    else:
+        dir_name = base_dir / dir_name
+    print(f"Loading from directory: {dir_name}")
+    config_path = dir_name / "config.json"
+    if config_path.exists():
+        try:
+            import json
+            with open(config_path, "r") as f:
+                config = json.load(f)
+            num_policies = config.get("num_policies")
+        except Exception as e:
+            print(f"Warning: Failed to parse {config_path}: {e}")
+            num_policies = 100
+    else:
+        num_policies = 100
+
+    pt0 = max(dir_name.glob("policy0_ckpt*.pt"))
+    pt1 = max(dir_name.glob("policy1_ckpt*.pt"))
 
     # pt0 = max(chosen_subdir.glob("policy0_ckpt24.pt"))
     # pt1 = max(chosen_subdir.glob("policy1_ckpt24.pt"))
     agent0 = PPOConditionedOnPolicyRepresentationAgent(
         num_actions, info_state_size, 'cpu',
-        num_policies=100, policy_embedding_size=policy_embedding_size, hidden_size=hidden_size
+        num_policies=num_policies, policy_embedding_size=policy_embedding_size, hidden_size=hidden_size
     )
     agent1 = PPOConditionedOnPolicyRepresentationAgent(
         num_actions, info_state_size, 'cpu',
-        num_policies=100, policy_embedding_size=policy_embedding_size, hidden_size=hidden_size
+        num_policies=num_policies, policy_embedding_size=policy_embedding_size, hidden_size=hidden_size
     )
     agent0.load(pt0)
     agent1.load(pt1)
@@ -234,8 +277,8 @@ def make_ppo_policies_from_neupl_agents(
     for player_id in range(2):
         player_policies = []
         for i in range(num_policies_to_make):
-            policy_index_1 = torch.tensor(random.randint(0, original_num_policies - 1))
-            policy_index_2 = torch.tensor(random.randint(0, original_num_policies - 1))
+            policy_index_1 = torch.tensor(random.randint(1, original_num_policies - 1)) # start from 1 because 0 is not used (in our neupl implementation, 0 is the uniform random policy)
+            policy_index_2 = torch.tensor(random.randint(1, original_num_policies - 1))
             embedding_1 = agents[player_id].embedding_prenorm(policy_index_1)
             embedding_2 = agents[player_id].embedding_prenorm(policy_index_2)
             mixture = random.random()
@@ -250,12 +293,12 @@ def make_ppo_policies_from_neupl_agents(
 
 def make_neupl_policies(
     game_short_name: str,
-    hidden_size: int,
-    policy_embedding_size: int,
+    neupl_config: dict,
     original_num_policies: int = 100,
     num_policies_to_make: int = 1000,
+    directory: Optional[str] = None,
 ):
-    agents = load_ppo_agents_from_neupl(game_short_name=game_short_name, hidden_size=hidden_size, policy_embedding_size=policy_embedding_size)
+    agents = load_ppo_agents_from_neupl(game_short_name=game_short_name, **neupl_config, dir_name=directory)
     return make_ppo_policies_from_neupl_agents(game_short_name, agents, original_num_policies=original_num_policies, num_policies_to_make=num_policies_to_make)
 
 
@@ -264,11 +307,14 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--neupl', action='store_true', help='Run neupl instead of standard psro')
+    parser.add_argument('--use_randall_loss', action='store_true', help='Use randall loss instead of standard loss')
     parser.add_argument('--game_name', type=str, default='kuhn_poker', help='Game to run')
     args = parser.parse_args()
+    if args.use_randall_loss:
+        assert args.neupl, "Use randall loss only with neupl"
 
     game_name = args.game_name
     if args.neupl:
-        run_neupl(game_name)
+        run_neupl(game_name, use_randall_loss=args.use_randall_loss)
     else:
         run_psro(game_name)

@@ -46,3 +46,4 @@ sigma: 0.0
 sims_per_entry: 250
 symmetric_game: false
 training_strategy_selector: probabilistic
+num_policies: 25

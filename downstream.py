@@ -16,7 +16,11 @@ from typing import List, Callable, Any, Optional
 from tqdm import tqdm
 
 from open_spiel.python.algorithms.psro_v2.abstract_meta_trainer import sample_episode
-from open_spiel.python.policy import Policy
+from open_spiel.python.policy import Policy, UniformRandomPolicy
+import pyspiel
+from pyspiel import TabularBestResponse
+from open_spiel.python.algorithms import policy_utils, best_response
+from open_spiel.python.algorithms.psro_v2 import utils as psro_utils
 from utils import PPOAgentPolicy, get_expected_payoffs
 
 
@@ -268,6 +272,11 @@ class PayoffPredictor:
             'val_loss': []
         }
 
+        # Early stopping
+        best_val_loss = float('inf')
+        patience_counter = 0
+        patience = 50
+
         # Training loop
         for epoch in range(num_epochs):
             self.model.train()
@@ -304,6 +313,16 @@ class PayoffPredictor:
             epoch_val_loss = val_loss.item()
             history['train_loss'].append(epoch_train_loss)
             history['val_loss'].append(epoch_val_loss)
+
+            # Early stopping check
+            if epoch_val_loss < best_val_loss:
+                best_val_loss = epoch_val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"Early stopping at epoch {epoch+1} - validation loss plateaued")
+                    break
 
             if verbose and (epoch + 1) % 10 == 0:
                 print(f"Epoch {epoch+1}/{num_epochs} - "
@@ -632,6 +651,11 @@ class StatePayoffPredictor(PayoffPredictor):
             'val_loss': []
         }
 
+        # Early stopping
+        best_val_loss = float('inf')
+        patience_counter = 0
+        patience = 50
+
         # Training loop
         for epoch in range(num_epochs):
             self.model.train()
@@ -668,6 +692,16 @@ class StatePayoffPredictor(PayoffPredictor):
             epoch_val_loss = val_loss.item()
             history['train_loss'].append(epoch_train_loss)
             history['val_loss'].append(epoch_val_loss)
+
+            # Early stopping check
+            if epoch_val_loss < best_val_loss:
+                best_val_loss = epoch_val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"Early stopping at epoch {epoch+1} - validation loss plateaued")
+                    break
 
             if verbose and (epoch + 1) % 10 == 0:
                 print(f"Epoch {epoch+1}/{num_epochs} - "
@@ -762,3 +796,187 @@ class StatePayoffPredictor(PayoffPredictor):
         }
 
         return metrics
+
+class ExploitabilityPredictorTrainer:
+    """We use the term "exploitability" loosely here.
+    What we actually predict is the expected payoff of the BR to the policy."""
+    def __init__(
+            self,
+            game,
+            policies: list[Policy],
+            embeddings: list[np.ndarray],
+            player_id: int,
+            hidden_dims: List[int],
+            learning_rate: float = 1e-4,
+            dropout: float = 0.0,
+            device: str = "cpu",
+    ):
+        self.game = game
+        self.initial_state = game.new_initial_state()
+        self.policies = policies
+        self.embeddings = torch.tensor(embeddings).to(device)
+        self.player_id = player_id
+        self.embedding_dim = embeddings[0].shape[0]
+        self.model = PayoffModel(
+            self.embedding_dim,
+            hidden_dims=hidden_dims,
+            dropout=dropout,
+        ).to(device)
+        self.device = device
+        self.learning_rate = learning_rate
+        self.compute_ground_truth_payoffs()
+        num_policies = len(self.policies)
+        TRAIN_PROPORTION = 0.8
+        perm = np.random.permutation(num_policies)
+        self.train_indices = perm[:int(num_policies * TRAIN_PROPORTION)]
+        self.val_indices = perm[int(num_policies * TRAIN_PROPORTION):]
+    def compute_ground_truth_payoffs(self):
+        # copied from psro_v2/best_response_oracle.py
+        best_responder_id = 1 - self.player_id
+        self.ground_truth_payoffs = torch.zeros(len(self.policies))
+        game = self.game
+        self.all_states, self.state_to_information_state = (
+            psro_utils.compute_states_and_info_states_if_none(
+                game, None, None))
+        policy = UniformRandomPolicy(game)
+        policy_to_dict = policy_utils.policy_to_dict(
+            policy, game, self.all_states, self.state_to_information_state)
+
+        # pylint: disable=g-complex-comprehension
+        # Cache TabularBestResponse for players, due to their costly construction
+        # TODO(b/140426861): Use a single best-responder once the code supports
+        # multiple player ids.
+        self.best_response_processor = pyspiel.TabularBestResponse(game, best_responder_id, policy_to_dict,)
+            # pyspiel.TabularBestResponse(game, best_responder_id, policy_to_dict,
+            #                             prob_cut_threshold,
+            #                             action_value_tolerance)
+        self.best_responder = best_response.CPPBestResponsePolicy(
+                game, best_responder_id, policy, self.all_states,
+                self.state_to_information_state,
+                self.best_response_processor
+            )
+        for i, policy in enumerate(tqdm(self.policies, desc="computing best response policies")):
+            self.best_response_processor.set_policy(
+              policy_utils.policy_to_dict(policy, game, self.all_states,
+                                          self.state_to_information_state))
+            self.best_responder = (
+                best_response.CPPBestResponsePolicy(
+                    game, best_responder_id, policy, self.all_states,
+                    self.state_to_information_state,
+                    self.best_response_processor))
+            self.ground_truth_payoffs[i] = self.best_responder.value(self.initial_state).item()
+            # breakpoint()
+        self.ground_truth_payoffs = self.ground_truth_payoffs.to(self.device)
+
+    def evaluate(self, eval_set: str = "all"):
+        """
+        Evaluate the model on exploitability predictions.
+        """
+        if eval_set == "train" and self.train_indices is not None:
+            indices = self.train_indices
+            test_payoffs = self.ground_truth_payoffs[indices]
+            print(f"Evaluating on training set ({len(indices)})...")
+        elif eval_set == "val" and self.val_indices is not None:
+            indices = self.val_indices
+            test_payoffs = self.ground_truth_payoffs[indices]
+            print(f"Evaluating on validation set ({len(indices)})...")
+        elif eval_set == "all":
+            test_payoffs = self.ground_truth_payoffs
+            print(f"Evaluating on all triples ({len(test_payoffs)})...")
+        else:
+            raise ValueError(f"Invalid eval_set: {eval_set}. Must be 'all', 'train', or 'val'. "
+                           f"Also ensure train() has been called to create the split.")
+        predictions = self.model(self.embeddings[indices])
+        # breakpoint()
+        metrics = {
+            'mse': ((predictions - test_payoffs) ** 2).mean(),
+            'mae': (predictions - test_payoffs).abs().mean(),
+            'predictions': predictions,
+            'ground_truth': test_payoffs
+        }
+        return metrics
+    
+    def train(self):
+        batch_size = 32
+        self.criterion = nn.MSELoss()
+        verbose = True
+        num_epochs = 5000
+
+        embeddings = self.embeddings
+        train_indices = torch.tensor(self.train_indices, device=self.device)
+        val_indices = torch.tensor(self.val_indices, device=self.device)
+        self.model.train()
+        X_train = torch.tensor(embeddings[train_indices], device=self.device)
+        y_train = torch.tensor(self.ground_truth_payoffs[train_indices], device=self.device)
+        X_val = torch.tensor(embeddings[val_indices], device=self.device)
+        y_val = torch.tensor(self.ground_truth_payoffs[val_indices], device=self.device)
+
+        # Initialize optimizer
+        self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
+
+        # Training history
+        history = {
+            'train_loss': [],
+            'val_loss': []
+        }
+
+        # Early stopping
+        best_val_loss = float('inf')
+        patience_counter = 0
+        patience = 50
+
+        # Training loop
+        for epoch in range(num_epochs):
+            self.model.train()
+
+            # Shuffle training data
+            perm = torch.randperm(len(X_train))
+            X_train_shuffled = X_train[perm]
+            y_train_shuffled = y_train[perm]
+
+            train_losses = []
+
+            # Mini-batch training
+            for i in range(0, len(X_train), batch_size):
+                batch_X = X_train_shuffled[i:i+batch_size]
+                batch_y = y_train_shuffled[i:i+batch_size]
+
+                self.optimizer.zero_grad()
+                predictions = self.model(batch_X)
+                loss = self.criterion(predictions, batch_y)
+
+                loss.backward()
+                self.optimizer.step()
+
+                train_losses.append(loss.item())
+
+            # Validation
+            self.model.eval()
+            with torch.no_grad():
+                val_predictions = self.model(X_val)
+                val_loss = self.criterion(val_predictions, y_val)
+
+            # Record history
+            epoch_train_loss = np.mean(train_losses)
+            epoch_val_loss = val_loss.item()
+            history['train_loss'].append(epoch_train_loss)
+            history['val_loss'].append(epoch_val_loss)
+
+            # Early stopping check
+            if epoch_val_loss < best_val_loss:
+                best_val_loss = epoch_val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"Early stopping at epoch {epoch+1} - validation loss plateaued")
+                    break
+
+            if verbose and (epoch + 1) % 10 == 0:
+                print(f"Epoch {epoch+1}/{num_epochs} - "
+                      f"Train Loss: {epoch_train_loss:.6f}, "
+                      f"Val Loss: {epoch_val_loss:.6f}")
+
+        return history
+            
+
