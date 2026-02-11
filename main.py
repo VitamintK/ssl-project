@@ -53,9 +53,62 @@ handler = logging.StreamHandler()
 handler.setFormatter(logging.Formatter('%(message)s'))
 logger.addHandler(handler)
 
+
+def get_feel_for_values(values: np.ndarray, label: str = "Values"):
+    """
+    Print statistics and a sample of values to get a feel for the data distribution.
+
+    Args:
+        values: Array of values to analyze
+        label: Label for the values (e.g., "Ground Truth Payoffs")
+    """
+    print(f"\n{'='*80}")
+    print(f"Getting a feel for {label}")
+    print(f"{'='*80}")
+
+    # Flatten if needed
+    if values.ndim > 1:
+        values_flat = values.flatten()
+    else:
+        values_flat = values
+
+    # Basic statistics
+    print(f"Shape: {values.shape}")
+    print(f"Count: {len(values_flat)}")
+    print(f"Min: {values_flat.min():.6f}")
+    print(f"Max: {values_flat.max():.6f}")
+    print(f"Mean: {values_flat.mean():.6f}")
+    print(f"Median: {np.median(values_flat):.6f}")
+    print(f"Std: {values_flat.std():.6f}")
+
+    # Percentiles
+    percentiles = [0, 25, 50, 75, 100]
+    print(f"\nPercentiles:")
+    for p in percentiles:
+        print(f"  {p}%: {np.percentile(values_flat, p):.6f}")
+
+    # Sample of 20 values
+    print(f"\nSample of 20 values:")
+    sample_indices = np.linspace(0, len(values_flat) - 1, min(20, len(values_flat)), dtype=int)
+    for i, idx in enumerate(sample_indices):
+        print(f"  [{idx}]: {values_flat[idx]:.6f}")
+
+    # Simple text histogram (10 bins)
+    print(f"\nHistogram (10 bins):")
+    hist, bin_edges = np.histogram(values_flat, bins=10)
+    max_bar_width = 50
+    max_count = hist.max()
+
+    for i in range(len(hist)):
+        bar_width = int((hist[i] / max_count) * max_bar_width) if max_count > 0 else 0
+        bar = '█' * bar_width
+        print(f"  [{bin_edges[i]:7.4f}, {bin_edges[i+1]:7.4f}): {hist[i]:5d} {bar}")
+
+    print(f"{'='*80}\n")
+
 def test_downstream_task_a(
         game: pyspiel.Game,
-        predictor_type: Literal["mlp", "linear"],
+        predictor_type: Literal["mlp", "linear", "random_forest"],
         encoder_type: Literal["identity", "weight_autoencoder", "functional_autoencoder"],
         autoencoder_ppo_agents: Optional[list[PPOAgent]] = None,
         downstream_task_ppo_agents: Optional[list[PPOAgent]] = None,
@@ -68,7 +121,7 @@ def test_downstream_task_a(
 
     Args:
         game: The OpenSpiel game to use
-        predictor_type: Type of predictor ("mlp" or "linear")
+        predictor_type: Type of predictor ("mlp", "linear", or "random_forest")
         encoder_type: Type of encoder ("identity", "weight_autoencoder", or "functional_autoencoder")
         experiment_label: Label for the experiment subdirectory (default: "downstream_a")
         functional_dataset_fraction: Fraction of functional AE training data to keep (only used for the functional encoder)
@@ -171,12 +224,6 @@ def test_downstream_task_a(
         raise ValueError(f"Invalid encoder type: {encoder_type}")
 
     # Create and train payoff predictor
-    if predictor_type == "mlp":
-        hidden_dims = [128, 64, 32]
-    elif predictor_type == "linear":
-        hidden_dims = []
-    else:
-        raise ValueError(f"Invalid predictor type: {predictor_type}")
     if downstream_task_ppo_agents is None:
         downstream_task_ppo_agents = [
             PPOAgent(
@@ -188,19 +235,36 @@ def test_downstream_task_a(
             )
             for _ in range(predictor_agent_count)
         ]
+
+    # Common data preparation
+    p1_embeddings = np.array([encoder_fn(agent).detach().cpu().numpy() for agent in downstream_task_ppo_agents])
+    p1_policies = [PPOAgentPolicy(game, agent, 0, False) for agent in downstream_task_ppo_agents]
+    p2_policies = [opponent_policy]
+
+    # Create predictor (unified interface for all types)
+    if predictor_type == "mlp":
+        hidden_dims = [128, 64, 32]
+    elif predictor_type == "linear":
+        hidden_dims = []
+    elif predictor_type == "random_forest":
+        hidden_dims = None  # Not used for random forest
+    else:
+        raise ValueError(f"Invalid predictor type: {predictor_type}")
+
     predictor = PayoffPredictor(
         game=game,
-        p1_policies=[PPOAgentPolicy(game, agent, 0, False) for agent in downstream_task_ppo_agents],
-        p2_policies=[opponent_policy],
-        p1_embeddings=[encoder_fn(agent).detach().cpu().numpy() for agent in downstream_task_ppo_agents],
-        # TODO: we're detaching and moving to cpu/numpy here, but then later we just put them on the device anyways.
-        #       We should probably just keep them on the device as pytorch tensors the whole time.
+        p1_policies=p1_policies,
+        p2_policies=p2_policies,
+        p1_embeddings=p1_embeddings,
         p2_embeddings=[np.array([0])],
+        model_type=predictor_type,
         hidden_dims=hidden_dims,
         dropout=0.0,
         device="cpu"
     )
-    print("\nTraining predictor model...")
+
+    # Train the model
+    print(f"\nTraining {predictor_type} predictor...")
     history = predictor.train(
         num_epochs=5000,
         batch_size=16,
@@ -209,20 +273,23 @@ def test_downstream_task_a(
         verbose=True
     )
 
-    # Evaluate payoff predictor on validation set
+    # Get a feel for the ground truth payoffs
+    get_feel_for_values(predictor.ground_truth_payoffs, label="Ground Truth Payoffs (Task A)")
+
+    # Evaluate on validation set
     print("\nEvaluating model on validation set...")
     val_metrics = predictor.evaluate(eval_set="val")
     print(f"\nValidation Set Results:")
     logger.info(f"MSE: {val_metrics['mse']:.6f}")
     print(f"MAE: {val_metrics['mae']:.6f}")
 
-    # Baseline: predict mean for everything (validation set)
+    # Compute baseline (predict mean of training set)
     val_payoffs = predictor.ground_truth_payoffs[predictor.val_indices]
-    # mean_payoff = np.mean(val_payoffs)
-    # baseline_mse = np.mean((val_payoffs - mean_payoff) ** 2)
-    # baseline_mae = np.mean(np.abs(val_payoffs - mean_payoff))
-    # Baseline 2: predict mean for everything (training set)
+    if predictor_type == "random_forest":
+        val_payoffs = val_payoffs[:, 0]  # Extract p1 payoffs for RF
     train_payoffs = predictor.ground_truth_payoffs[predictor.train_indices]
+    if predictor_type == "random_forest":
+        train_payoffs = train_payoffs[:, 0]  # Extract p1 payoffs for RF
     mean_payoff2 = np.mean(train_payoffs)
     baseline_mse2 = np.mean((val_payoffs - mean_payoff2) ** 2)
     
@@ -706,6 +773,10 @@ def test_downstream_task_d(
         device=device
     )
     trainer.train()
+
+    # Get a feel for the ground truth payoffs
+    get_feel_for_values(trainer.ground_truth_payoffs.cpu().numpy(), label="Ground Truth Payoffs (Task D)")
+
     # Evaluate on validation set
     print("\nEvaluating model on validation set...")
     val_metrics = trainer.evaluate(eval_set="val")
@@ -726,7 +797,7 @@ def test_downstream_task_d(
     print(f"MAE reduction: {(1 - val_metrics['mae']/baseline_mae)*100:.2f}%")
     register_result(exp_label, val_metrics['mse'], baseline_mse)
 
-def get_policies_and_embeddings(player_id: int, ppo_agents: list[PPOAgent], experiment_label: str, game_short_name: str, device: str):
+def get_policies_and_embeddings(game, player_id: int, ppo_agents: list[PPOAgent], experiment_label: str, game_short_name: str, device: str):
     print("\nTraining autoencoder on agent weights...")
     autoencoder_ppo_agents = ppo_agents[:len(ppo_agents)//2]
     downstream_ppo_agents = ppo_agents[len(ppo_agents)//2:]
@@ -752,8 +823,7 @@ def get_policies_and_embeddings(player_id: int, ppo_agents: list[PPOAgent], expe
     policies = [PPOAgentPolicy(game, agent, player_id, False) for agent in downstream_ppo_agents]
     return policies, embeddings
 
-def get_policies_and_embeddings2(player_id: int, ppo_agents: list[PPOAgent], experiment_label: str, game_short_name: str, device: str):
-    print("\nTraining autoencoder on agent weights...")
+def get_policies_and_embeddings2(game, player_id: int, ppo_agents: list[PPOAgent], experiment_label: str, game_short_name: str, device: str):
     embeddings = [ppo_agent_to_vector(agent).detach().cpu().numpy() for agent in ppo_agents]
     policies = [PPOAgentPolicy(game, agent, player_id, False) for agent in ppo_agents]
     return policies, embeddings
@@ -859,30 +929,39 @@ if __name__ == "__main__":
             for use_randall_loss in [True, False]:
                 # logger.info(f"--Running task: NEUPL {game_short_name} player_id={player_id} use_randall_loss={use_randall_loss}")
                 N = 1000 # 1500 or 3000 works fine for kuhn
+                NEUPL_SAMPLING_MODE = "gaussian"
+                INTERPOLATE_PRENORM = True
                 neupl_config = {
                     'use_randall_loss': use_randall_loss,
                     'hidden_size': 256,
                     'policy_embedding_size': 64,
                 }
                 for player_id in range(2):
-                    policies_and_embeddings = make_neupl_policies(game_short_name, neupl_config=neupl_config, original_num_policies=23, num_policies_to_make=N,
-                                                                  directory=runs_to_load[use_randall_loss][seed_num])
+                    policies_and_embeddings = make_neupl_policies(
+                        game_short_name,
+                        neupl_config=neupl_config,
+                        original_num_policies=23,
+                        num_policies_to_make=N,
+                        directory=runs_to_load[use_randall_loss][seed_num],
+                        interpolate_prenorm=INTERPOLATE_PRENORM,
+                        sampling_mode=NEUPL_SAMPLING_MODE,
+                    )
                     policies, embeddings = [p_e[1] for p_e in policies_and_embeddings[player_id]], [p_e[0].detach().cpu().numpy() for p_e in policies_and_embeddings[player_id]]
 
                     if RUN_TASK_A:
-                        exp_label = f'{game_short_name} neupl {player_id} {use_randall_loss} {N} Task A'
+                        exp_label = f'{game_short_name} neupl p{player_id} randloss={use_randall_loss} N={N} Task A'
                         logger.info(f"--Running task: NEUPL {game_short_name} player_id={player_id} use_randall_loss={use_randall_loss} Task A")
                         test_downstream_task_a_(game, exp_label=exp_label, policies=policies, embeddings=embeddings, predictor_type="linear", device=device)
                     if RUN_TASK_D:
-                        exp_label = f'{game_short_name} neupl {player_id} {use_randall_loss} {N} Task D'
+                        exp_label = f'{game_short_name} neupl p{player_id} randloss={use_randall_loss} N={N} Task D'
                         logger.info(f"--Running task: NEUPL {game_short_name} player_id={player_id} use_randall_loss={use_randall_loss} Task D")
                         test_downstream_task_d(game_short_name, exp_label=exp_label, player_id=player_id, policies=policies, embeddings=embeddings, predictor_type="linear", device=device)
         if RUN_PSRO:
             for player_id in range(2):
             # logger.info(f"--Running tasks: PSRO {game_short_name} player_id={player_id}")
                 psro_ppo_agents_256 = load_ppo_agents_from_psro(game_short_name=game_short_name, hidden_size=256, player_id=player_id, shuffle=True)
-                policies, embeddings = get_policies_and_embeddings(player_id, psro_ppo_agents_256, "psro_" + game_short_name, game_short_name, device)
-                _, identity_embeddings = get_policies_and_embeddings2(player_id, psro_ppo_agents_256, "psro_" + game_short_name, game_short_name, device)
+                policies, embeddings = get_policies_and_embeddings(game, player_id, psro_ppo_agents_256, "psro_" + game_short_name, game_short_name, device)
+                _, identity_embeddings = get_policies_and_embeddings2(game, player_id, psro_ppo_agents_256, "psro_" + game_short_name, game_short_name, device)
                 if RUN_TASK_A:
                     exp_label = f'{game_short_name} psro {player_id} reconstruction-autoencoder Task A'
                     logger.info(f"--Running task: PSRO {game_short_name} player_id={player_id} reconstruction-autoencoder Task A")
@@ -901,8 +980,8 @@ if __name__ == "__main__":
             N = 1000
             ppo_agents = [PPOAgent(num_actions, info_state_size, 'cpu', layer_init, 256) for _ in range(N)]
             player_id = 0
-            policies, embeddings = get_policies_and_embeddings(player_id, ppo_agents, "ppo random " + game_short_name, game_short_name, device)
-            _, identity_embeddings = get_policies_and_embeddings2(player_id, ppo_agents, "ppo random " + game_short_name, game_short_name, device)
+            policies, embeddings = get_policies_and_embeddings(game, player_id, ppo_agents, "ppo random " + game_short_name, game_short_name, device)
+            _, identity_embeddings = get_policies_and_embeddings2(game, player_id, ppo_agents, "ppo random " + game_short_name, game_short_name, device)
             if RUN_TASK_A:
                 exp_label = f'{game_short_name} ppo random {player_id} reconstruction-autoencoder Task A'
                 logger.info(f"--Running task: PPO random {game_short_name} reconstruction-autoencoder Task A")

@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 import random
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 import uuid
 from omegaconf import OmegaConf
 import pyspiel
@@ -11,7 +11,6 @@ import numpy as np
 from iig_rl_benchmark.algorithms.psro import run_psro as iig_run_psro
 from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent, PPOConditionedOnPolicyRepresentationAgent
 from utils import PPONeuplAgentPolicy, get_device_string
-from typing import Union
 
 def set_seed(seed):
     """Set random seeds for reproducibility."""
@@ -271,24 +270,96 @@ def make_ppo_policies_from_neupl_agents(
     agents: list[PPOConditionedOnPolicyRepresentationAgent],
     original_num_policies: int = 100,
     num_policies_to_make: int = 1000,
+    interpolate_prenorm: bool = True,
+    sampling_mode: Literal["interpolate", "gaussian"] = "interpolate",
 ):
+    """
+    Generate policies from NEUPL agents using different sampling methods.
+
+    Args:
+        game_name: Name of the game
+        agents: List of PPOConditionedOnPolicyRepresentationAgent for each player
+        original_num_policies: Number of original policies in the NEUPL training
+        num_policies_to_make: Number of new policies to generate
+        interpolate_prenorm: If True, work in pre-norm space then normalize at the end
+        sampling_mode: How to sample new embeddings:
+            - "interpolate": Interpolate between two random existing policies
+            - "gaussian": Sample from multivariate Gaussian fit to existing policies
+
+    Returns:
+        List of (embedding, policy) tuples for each player
+    """
     game = pyspiel.load_game(game_name)
     policies = []
+
     for player_id in range(2):
         player_policies = []
-        for i in range(num_policies_to_make):
-            policy_index_1 = torch.tensor(random.randint(1, original_num_policies - 1)) # start from 1 because 0 is not used (in our neupl implementation, 0 is the uniform random policy)
-            policy_index_2 = torch.tensor(random.randint(1, original_num_policies - 1))
-            embedding_1 = agents[player_id].embedding_prenorm(policy_index_1)
-            embedding_2 = agents[player_id].embedding_prenorm(policy_index_2)
-            mixture = random.random()
-            embedding = (embedding_1 * mixture + embedding_2 * (1 - mixture)).unsqueeze(0)
-            normed_embedding = agents[player_id].embedding_norm(embedding)
-            player_policies.append((
-                normed_embedding.squeeze(0),
-                PPONeuplAgentPolicy(game, agents[player_id], player_id, use_observation=False, embedding=normed_embedding)
-            ))
+
+        if sampling_mode == "gaussian":
+            # Collect all existing embeddings
+            existing_embeddings = []
+            for policy_idx in range(1, original_num_policies):  # Skip 0 (uniform random)
+                policy_index_tensor = torch.tensor(policy_idx)
+                if interpolate_prenorm:
+                    # Get pre-norm embeddings for Gaussian fitting
+                    embedding = agents[player_id].embedding_prenorm(policy_index_tensor)
+                    existing_embeddings.append(embedding.detach().cpu().numpy())
+                else:
+                    # Get post-norm embeddings for Gaussian fitting
+                    embedding = agents[player_id].policy_representation_embedding(policy_index_tensor)
+                    existing_embeddings.append(embedding.detach().cpu().numpy())
+
+            existing_embeddings = np.array(existing_embeddings)
+
+            # Fit multivariate Gaussian
+            mean = np.mean(existing_embeddings, axis=0)
+            cov = np.cov(existing_embeddings.T)
+
+            # Sample from the Gaussian
+            sampled_embeddings = np.random.multivariate_normal(mean, cov, num_policies_to_make)
+
+            # Convert to policies
+            for sampled_embedding in sampled_embeddings:
+                embedding_tensor = torch.tensor(sampled_embedding, dtype=torch.float32)
+
+                if interpolate_prenorm:
+                    # Apply normalization to the sampled pre-norm embedding
+                    normed_embedding = agents[player_id].embedding_norm(embedding_tensor.unsqueeze(0))
+                else:
+                    # Already in post-norm space
+                    normed_embedding = embedding_tensor.unsqueeze(0)
+
+                player_policies.append((
+                    normed_embedding.squeeze(0),
+                    PPONeuplAgentPolicy(game, agents[player_id], player_id, use_observation=False, embedding=normed_embedding)
+                ))
+
+        elif sampling_mode == "interpolate":
+            # Original interpolation method
+            for i in range(num_policies_to_make):
+                policy_index_1 = torch.tensor(random.randint(1, original_num_policies - 1))
+                policy_index_2 = torch.tensor(random.randint(1, original_num_policies - 1))
+                mixture = random.random()
+
+                if interpolate_prenorm:
+                    embedding_1 = agents[player_id].embedding_prenorm(policy_index_1)
+                    embedding_2 = agents[player_id].embedding_prenorm(policy_index_2)
+                    embedding = (embedding_1 * mixture + embedding_2 * (1 - mixture)).unsqueeze(0)
+                    normed_embedding = agents[player_id].embedding_norm(embedding)
+                else:
+                    embedding_1 = agents[player_id].policy_representation_embedding(policy_index_1)
+                    embedding_2 = agents[player_id].policy_representation_embedding(policy_index_2)
+                    normed_embedding = (embedding_1 * mixture + embedding_2 * (1 - mixture)).unsqueeze(0)
+
+                player_policies.append((
+                    normed_embedding.squeeze(0),
+                    PPONeuplAgentPolicy(game, agents[player_id], player_id, use_observation=False, embedding=normed_embedding)
+                ))
+        else:
+            raise ValueError(f"Invalid sampling_mode: {sampling_mode}. Must be 'interpolate' or 'gaussian'.")
+
         policies.append(player_policies)
+
     return policies
 
 def make_neupl_policies(
@@ -297,9 +368,18 @@ def make_neupl_policies(
     original_num_policies: int = 100,
     num_policies_to_make: int = 1000,
     directory: Optional[str] = None,
+    interpolate_prenorm: bool = True,
+    sampling_mode: Literal["interpolate", "gaussian"] = "interpolate",
 ):
     agents = load_ppo_agents_from_neupl(game_short_name=game_short_name, **neupl_config, dir_name=directory)
-    return make_ppo_policies_from_neupl_agents(game_short_name, agents, original_num_policies=original_num_policies, num_policies_to_make=num_policies_to_make)
+    return make_ppo_policies_from_neupl_agents(
+        game_short_name,
+        agents,
+        original_num_policies=original_num_policies,
+        num_policies_to_make=num_policies_to_make,
+        interpolate_prenorm=interpolate_prenorm,
+        sampling_mode=sampling_mode,
+    )
 
 
 if __name__ == '__main__':

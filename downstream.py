@@ -3,7 +3,7 @@ Downstream task: Train a model to predict expected payoff between PPO agents and
 
 PayoffPredictor:
 1. Takes PPO agents and encodes them using a custom encoder function
-2. Trains a neural network to predict expected payoffs against a fixed opponent policy
+2. Trains a model (neural network or random forest) to predict expected payoffs against a fixed opponent policy
 3. Can be used to evaluate agent performance without running full game simulations
 """
 
@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import random
-from typing import List, Callable, Any, Optional
+from typing import List, Callable, Any, Optional, Literal
 from tqdm import tqdm
 
 from open_spiel.python.algorithms.psro_v2.abstract_meta_trainer import sample_episode
@@ -22,6 +22,14 @@ from pyspiel import TabularBestResponse
 from open_spiel.python.algorithms import policy_utils, best_response
 from open_spiel.python.algorithms.psro_v2 import utils as psro_utils
 from utils import PPOAgentPolicy, get_expected_payoffs
+
+# Import sklearn only when needed
+try:
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.metrics import mean_squared_error, mean_absolute_error
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
 
 
 def set_seed(seed=42):
@@ -113,7 +121,7 @@ class PayoffPredictor:
     Pipeline:
     - Encoding PPO agents into embeddings
     - Generating training data using ground-truth payoff calculations
-    - Training a regression model to predict payoffs from embeddings
+    - Training a regression model (neural network or random forest) to predict payoffs from embeddings
     - Evaluating the trained model
     """
 
@@ -124,8 +132,9 @@ class PayoffPredictor:
         p2_policies: list[Policy],
         p1_embeddings: list[np.ndarray],
         p2_embeddings: list[np.ndarray],
-        hidden_dims: List[int],
-        dropout: float,
+        model_type: Literal["mlp", "linear", "random_forest"] = "mlp",
+        hidden_dims: Optional[List[int]] = None,
+        dropout: float = 0.0,
         device: str = "cpu"
     ):
         """
@@ -133,30 +142,54 @@ class PayoffPredictor:
 
         Args:
             game: OpenSpiel game instance
-            p1_agents: List of P1 agents
-            p2_agents: List of P2 agents (can be a single-element list for fixed opponent)
-            p1_encoder_fn: Function that maps a P1 agent to an embedding vector
-            p2_encoder_fn: Function that maps a P2 agent to an embedding vector
-            hidden_dims: Hidden layer dimensions for the predictor network
-            dropout: Dropout rate for the predictor network
+            p1_policies: List of P1 policies
+            p2_policies: List of P2 policies (can be a single-element list for fixed opponent)
+            p1_embeddings: P1 agent embeddings
+            p2_embeddings: P2 agent embeddings
+            model_type: Type of model to use ("mlp", "linear", or "random_forest")
+            hidden_dims: Hidden layer dimensions for neural network models (ignored for random_forest)
+            dropout: Dropout rate for neural network models (ignored for random_forest)
             device: cpu or cuda
         """
         self.game = game
         self.p1_policies = p1_policies
         self.p2_policies = p2_policies
         self.device = device
+        self.model_type = model_type
         self.p1_embeddings = np.array(p1_embeddings)
         self.p2_embeddings = np.array(p2_embeddings)
+
         # Concatenate P1 and P2 embeddings for input
         self.embedding_dim = self.p1_embeddings.shape[1] + self.p2_embeddings.shape[1]
-        # Initialize the predictor model
-        self.model = PayoffModel(
-            self.embedding_dim,
-            hidden_dims=hidden_dims,
-            dropout=dropout
-        ).to(device)
-        self.optimizer = None
-        self.criterion = nn.MSELoss()
+
+        # Initialize the predictor model based on type
+        if model_type == "random_forest":
+            if not SKLEARN_AVAILABLE:
+                raise ImportError("sklearn is required for random_forest model type")
+            # Initialize Random Forest with default parameters
+            # Will be replaced with best model during training with early stopping
+            self.model = RandomForestRegressor(
+                n_estimators=100,
+                max_depth=None,
+                min_samples_split=2,
+                min_samples_leaf=1,
+                random_state=42,
+                n_jobs=-1
+            )
+            self.optimizer = None
+            self.criterion = None
+        else:
+            # Neural network models
+            if hidden_dims is None:
+                hidden_dims = [128, 64, 32] if model_type == "mlp" else []
+            self.model = PayoffModel(
+                self.embedding_dim,
+                hidden_dims=hidden_dims,
+                dropout=dropout
+            ).to(device)
+            self.optimizer = None
+            self.criterion = nn.MSELoss()
+
         self.ground_truth_payoffs = None
         self.train_indices = None
         self.val_indices = None
@@ -190,12 +223,11 @@ class PayoffPredictor:
         Train the payoff predictor model.
 
         Args:
-            num_epochs: Number of training epochs
-            batch_size: Batch size for training
-            learning_rate: Learning rate for optimizer
+            num_epochs: Number of training epochs (for neural networks; ignored for random_forest)
+            batch_size: Batch size for training (neural networks only)
+            learning_rate: Learning rate for optimizer (neural networks only)
             validation_split: Fraction of data to use for validation
             verbose: Whether to print training progress
-            seed: Random seed for reproducibility
 
         Returns:
             dict: Training history with train/val losses
@@ -258,76 +290,130 @@ class PayoffPredictor:
         self.train_indices = train_indices
         self.val_indices = val_indices
 
-        X_train = torch.FloatTensor(embeddings[train_indices]).to(self.device)
-        y_train = torch.FloatTensor(self.ground_truth_payoffs[train_indices]).to(self.device)
-        X_val = torch.FloatTensor(embeddings[val_indices]).to(self.device)
-        y_val = torch.FloatTensor(self.ground_truth_payoffs[val_indices]).to(self.device)
-
-        # Initialize optimizer
-        self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
-
         # Training history
         history = {
             'train_loss': [],
             'val_loss': []
         }
 
-        # Early stopping
-        best_val_loss = float('inf')
-        patience_counter = 0
-        patience = 50
+        if self.model_type == "random_forest":
+            # Random Forest training with early stopping
+            X_train = embeddings[train_indices]
+            y_train = self.ground_truth_payoffs[train_indices, 0]  # Payoffs for p1 vs opponent
+            X_val = embeddings[val_indices]
+            y_val = self.ground_truth_payoffs[val_indices, 0]
 
-        # Training loop
-        for epoch in range(num_epochs):
-            self.model.train()
+            # Early stopping parameters
+            best_val_mse = float('inf')
+            patience_counter = 0
+            patience = 5  # Early stopping patience for RF (fewer than NN since RF trains faster)
 
-            # Shuffle training data
-            perm = torch.randperm(len(X_train))
-            X_train_shuffled = X_train[perm]
-            y_train_shuffled = y_train[perm]
+            # Try progressively more trees, implementing early stopping
+            for n_trees in [10, 25, 50, 100, 150, 200, 300]:
+                rf_model = RandomForestRegressor(
+                    n_estimators=n_trees,
+                    max_depth=None,
+                    min_samples_split=2,
+                    min_samples_leaf=1,
+                    random_state=42,
+                    n_jobs=-1,
+                    warm_start=False
+                )
+                rf_model.fit(X_train, y_train)
 
-            train_losses = []
+                # Evaluate on train and val
+                train_pred = rf_model.predict(X_train)
+                val_pred = rf_model.predict(X_val)
+                train_mse = mean_squared_error(y_train, train_pred)
+                val_mse = mean_squared_error(y_val, val_pred)
 
-            # Mini-batch training
-            for i in range(0, len(X_train), batch_size):
-                batch_X = X_train_shuffled[i:i+batch_size]
-                batch_y = y_train_shuffled[i:i+batch_size]
+                history['train_loss'].append(train_mse)
+                history['val_loss'].append(val_mse)
 
-                self.optimizer.zero_grad()
-                predictions = self.model(batch_X)
-                loss = self.criterion(predictions, batch_y)
+                if verbose:
+                    print(f"n_estimators={n_trees}: Train MSE={train_mse:.6f}, Val MSE={val_mse:.6f}")
 
-                loss.backward()
-                self.optimizer.step()
+                # Early stopping check
+                if val_mse < best_val_mse:
+                    best_val_mse = val_mse
+                    best_rf_model = rf_model
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        if verbose:
+                            print(f"Early stopping at n_estimators={n_trees} - validation MSE plateaued")
+                        break
 
-                train_losses.append(loss.item())
+            self.model = best_rf_model
 
-            # Validation
-            self.model.eval()
-            with torch.no_grad():
-                val_predictions = self.model(X_val)
-                val_loss = self.criterion(val_predictions, y_val)
+        else:
+            # Neural network training (mlp or linear)
+            X_train = torch.FloatTensor(embeddings[train_indices]).to(self.device)
+            y_train = torch.FloatTensor(self.ground_truth_payoffs[train_indices]).to(self.device)
+            X_val = torch.FloatTensor(embeddings[val_indices]).to(self.device)
+            y_val = torch.FloatTensor(self.ground_truth_payoffs[val_indices]).to(self.device)
 
-            # Record history
-            epoch_train_loss = np.mean(train_losses)
-            epoch_val_loss = val_loss.item()
-            history['train_loss'].append(epoch_train_loss)
-            history['val_loss'].append(epoch_val_loss)
+            # Initialize optimizer
+            self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
 
-            # Early stopping check
-            if epoch_val_loss < best_val_loss:
-                best_val_loss = epoch_val_loss
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    print(f"Early stopping at epoch {epoch+1} - validation loss plateaued")
-                    break
+            # Early stopping
+            best_val_loss = float('inf')
+            patience_counter = 0
+            patience = 50
 
-            if verbose and (epoch + 1) % 10 == 0:
-                print(f"Epoch {epoch+1}/{num_epochs} - "
-                      f"Train Loss: {epoch_train_loss:.6f}, "
-                      f"Val Loss: {epoch_val_loss:.6f}")
+            # Training loop
+            for epoch in range(num_epochs):
+                self.model.train()
+
+                # Shuffle training data
+                perm = torch.randperm(len(X_train))
+                X_train_shuffled = X_train[perm]
+                y_train_shuffled = y_train[perm]
+
+                train_losses = []
+
+                # Mini-batch training
+                for i in range(0, len(X_train), batch_size):
+                    batch_X = X_train_shuffled[i:i+batch_size]
+                    batch_y = y_train_shuffled[i:i+batch_size]
+
+                    self.optimizer.zero_grad()
+                    predictions = self.model(batch_X)
+                    loss = self.criterion(predictions, batch_y)
+
+                    loss.backward()
+                    self.optimizer.step()
+
+                    train_losses.append(loss.item())
+
+                # Validation
+                self.model.eval()
+                with torch.no_grad():
+                    val_predictions = self.model(X_val)
+                    val_loss = self.criterion(val_predictions, y_val)
+
+                # Record history
+                epoch_train_loss = np.mean(train_losses)
+                epoch_val_loss = val_loss.item()
+                history['train_loss'].append(epoch_train_loss)
+                history['val_loss'].append(epoch_val_loss)
+
+                # Early stopping check
+                if epoch_val_loss < best_val_loss:
+                    best_val_loss = epoch_val_loss
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        # if verbose:
+                        print(f"Early stopping at epoch {epoch+1} - validation loss plateaued")
+                        break
+
+                if verbose and (epoch + 1) % 10 == 0:
+                    print(f"Epoch {epoch+1}/{num_epochs} - "
+                          f"Train Loss: {epoch_train_loss:.6f}, "
+                          f"Val Loss: {epoch_val_loss:.6f}")
 
         return history
 
@@ -336,23 +422,31 @@ class PayoffPredictor:
         Predict the expected payoff for a P1-P2 agent pair.
 
         Args:
-            p1_agent: A P1 agent object
-            p2_agent: A P2 agent object
+            p1_embedding: P1 agent embedding
+            p2_embedding: P2 agent embedding
 
         Returns:
             float: Predicted expected payoff
         """
-        self.model.eval()
-        with torch.no_grad():
-            if isinstance(p1_embedding, torch.Tensor):
-                p1_embedding = p1_embedding.detach().cpu().numpy()
-            if isinstance(p2_embedding, torch.Tensor):
-                p2_embedding = p2_embedding.detach().cpu().numpy()
-            # Concatenate embeddings
-            concat_embedding = np.concatenate([p1_embedding, p2_embedding])
-            embedding_tensor = torch.FloatTensor(concat_embedding).unsqueeze(0).to(self.device)
-            prediction = self.model(embedding_tensor)
-            return prediction.item()
+        if isinstance(p1_embedding, torch.Tensor):
+            p1_embedding = p1_embedding.detach().cpu().numpy()
+        if isinstance(p2_embedding, torch.Tensor):
+            p2_embedding = p2_embedding.detach().cpu().numpy()
+
+        # Concatenate embeddings
+        concat_embedding = np.concatenate([p1_embedding, p2_embedding])
+
+        if self.model_type == "random_forest":
+            # Random Forest prediction
+            prediction = self.model.predict(concat_embedding.reshape(1, -1))
+            return prediction[0]
+        else:
+            # Neural network prediction
+            self.model.eval()
+            with torch.no_grad():
+                embedding_tensor = torch.FloatTensor(concat_embedding).unsqueeze(0).to(self.device)
+                prediction = self.model(embedding_tensor)
+                return prediction.item()
 
     def evaluate(self, eval_set: str = "all"):
         """
@@ -414,19 +508,35 @@ class PayoffPredictor:
 
     def save(self, path: str):
         """Save the trained model."""
-        torch.save({
-            'model_state_dict': self.model.state_dict(),
-            'embedding_dim': self.embedding_dim,
-            'optimizer_state_dict': self.optimizer.state_dict() if self.optimizer else None,
-        }, path)
+        if self.model_type == "random_forest":
+            import pickle
+            with open(path, 'wb') as f:
+                pickle.dump({
+                    'model': self.model,
+                    'model_type': self.model_type,
+                    'embedding_dim': self.embedding_dim
+                }, f)
+        else:
+            torch.save({
+                'model_state_dict': self.model.state_dict(),
+                'model_type': self.model_type,
+                'embedding_dim': self.embedding_dim,
+                'optimizer_state_dict': self.optimizer.state_dict() if self.optimizer else None,
+            }, path)
         print(f"Model saved to {path}")
 
     def load(self, path: str):
         """Load a trained model."""
-        checkpoint = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        if checkpoint['optimizer_state_dict'] and self.optimizer:
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if self.model_type == "random_forest":
+            import pickle
+            with open(path, 'rb') as f:
+                checkpoint = pickle.load(f)
+                self.model = checkpoint['model']
+        else:
+            checkpoint = torch.load(path, map_location=self.device)
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            if checkpoint['optimizer_state_dict'] and self.optimizer:
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         print(f"Model loaded from {path}")
 
 

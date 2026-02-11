@@ -11,7 +11,7 @@ The embeddings are visualized in 2D using t-SNE for exploration and analysis.
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 import argparse
 
 import numpy as np
@@ -22,6 +22,7 @@ from open_spiel.python import policy as policy_lib
 from open_spiel.python.policy import Policy
 
 from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
+from main import get_policies_and_embeddings
 from psro import load_ppo_agents_from_neupl, make_neupl_policies
 from utils import make_diverse_random_kuhn_poker_layer_init, get_device_string, PPOAgentPolicy
 from downstream import set_seed
@@ -258,7 +259,7 @@ def visualize_embeddings_tsne(
         n_components=2,
         perplexity=perplexity,
         random_state=seed,
-        max_iter=1000,
+        max_iter=2000,
         verbose=1
     )
     embeddings_2d = tsne.fit_transform(embeddings)
@@ -272,7 +273,8 @@ def visualize_embeddings_tsne(
         embeddings_2d[:, 0],
         embeddings_2d[:, 1],
         c=color_values,
-        cmap='viridis',
+        # cmap='viridis',
+        cmap='coolwarm',
         alpha=0.6,
         s=20
     )
@@ -440,28 +442,77 @@ def visualize_multiple_checkpoints(
 
     return fig
 
-def visualize_demo():
-    game = pyspiel.load_game("kuhn_poker")
-    # ppo_agents = load_ppo_agents_from_neupl(game_short_name="kuhn_poker", hidden_size=256, policy_embedding_size=64)
-    policies_and_embeddings = make_neupl_policies(game_short_name="kuhn_poker", hidden_size=256, policy_embedding_size=64)
-    p0_policies_and_embeddings = policies_and_embeddings[0]
+def visualize_wrapper(
+        encoder_type: Literal["neupl", "identity", "weight_autoencoder", "functional_autoencoder"],
+        game_name: str = "kuhn_poker",
+):
+    PERPLEXITY = 40
+    game = pyspiel.load_game(game_name)
+    if encoder_type == "neupl":
+        SAMPLING_MODE = "gaussian"
+        neupl_config = {
+            'hidden_size': 256,
+            'policy_embedding_size': 64,
+            'use_randall_loss': False,
+        }
+        policies_and_embeddings = make_neupl_policies(
+            game_short_name=game_name,
+            neupl_config=neupl_config,
+            original_num_policies=23,
+            num_policies_to_make=1000,
+            interpolate_prenorm=True,
+            sampling_mode=SAMPLING_MODE,
+        )
+        p0_policies_and_embeddings = policies_and_embeddings[0]
+        policies = [pe[1] for pe in p0_policies_and_embeddings]
+        embeddings = [pe[0].detach().cpu().numpy() for pe in p0_policies_and_embeddings]
+        # perplexity = 5
+    elif encoder_type == "identity":
+        p0_policies_and_embeddings = [
+            (np.zeros(64), PPOAgentPolicy(game, PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE), player_id=0, use_observation=False))
+            for _ in range(1000)
+        ]
+    elif encoder_type == "weight_autoencoder":
+        PLAYER_ID = 0
+        N = 2000 # half for training the encoder, half to be used for visualization
+        device = get_device_string()
+        game_short_name = game.get_type().short_name
+        info_state_size = game.information_state_tensor_shape()
+        num_actions = game.num_distinct_actions()
+        layer_init = make_diverse_random_kuhn_poker_layer_init(game)
+        ppo_agents = [PPOAgent(num_actions, info_state_size, 'cpu', layer_init, 256) for _ in range(N)]
+        policies, embeddings = get_policies_and_embeddings(game, PLAYER_ID, ppo_agents, "ppo random " + game_short_name, game_short_name, device)
+        # perplexity = 30
+        # _, identity_embeddings = get_policies_and_embeddings2(player_id, ppo_agents, "ppo random " + game_short_name, game_short_name, device)
+    elif encoder_type == "functional_autoencoder":
+        N = 2000 # half for training the encoder, half to be used for visualization
+        device = get_device_string()
+        game_short_name = game.get_type().short_name
+        info_state_size = game.information_state_tensor_shape()
+        num_actions = game.num_distinct_actions()
+        layer_init = make_diverse_random_kuhn_poker_layer_init(game)
+        ppo_agents = [PPOAgent(num_actions, info_state_size, 'cpu', layer_init, 256) for _ in range(N)]
+        policies, embeddings = get_policies_and_embeddings(game, PLAYER_ID, ppo_agents, "ppo random " + game_short_name, game_short_name, device)
+    else:
+        raise ValueError(f"Invalid encoder type: {encoder_type}")
     visualize_embeddings_tsne(
-        embeddings=[pe[0].detach().cpu().numpy() for pe in p0_policies_and_embeddings],
-        policies=[pe[1] for pe in p0_policies_and_embeddings],
+        embeddings=embeddings,
+        policies=policies,
         game=game,
         num_agents=1,
         opponent_pool=None,
         device="cpu",
         seed=42,
-        perplexity=30,
-        save_path="results/visualizations/tsne_kuhn_poker_neupl.png",
-        title_suffix="Neupl",
-        filename_suffix="_neupl",
+        perplexity=PERPLEXITY,
+        save_path=f"results/visualizations/tsne_{game_name}_{encoder_type}_P{PERPLEXITY}.png",
+        title_suffix=encoder_type,
+        filename_suffix=f"_{encoder_type}",
         aggressiveness_episodes=100,
     )
 
 if __name__ == "__main__":
-    visualize_demo()
+    # visualize_wrapper('weight_autoencoder', game_name='kuhn_poker')
+    visualize_wrapper('neupl', game_name='leduc_poker')
     exit()
     parser = argparse.ArgumentParser(description='Visualize trajectory encoder embeddings')
     parser.add_argument('--game', type=str, default='kuhn_poker',
