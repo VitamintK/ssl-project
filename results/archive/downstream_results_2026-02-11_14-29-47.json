@@ -1,0 +1,220 @@
+{
+  "run": [
+    {
+      "experiment_label": "leduc_poker neupl p0 randloss=True N=1000 Task A",
+      "config": {
+        "game": "leduc_poker",
+        "agent_source": "neupl",
+        "encoder_type": "reconstruction-autoencoder",
+        "player_id": 0,
+        "task": "task_a",
+        "task_a_predictor_type": "linear",
+        "neupl_use_randall_loss": true,
+        "neupl_num_policies": 1000
+      },
+      "results": [
+        {
+          "mse": 0.2671650889829771,
+          "baseline_mse": 0.32092204689979553
+        },
+        {
+          "mse": 0.2341120759575125,
+          "baseline_mse": 0.35819098353385925
+        },
+        {
+          "mse": 0.3161114798762557,
+          "baseline_mse": 0.41411086916923523
+        }
+      ]
+    },
+    {
+      "experiment_label": "leduc_poker neupl p0 randloss=True N=1000 Task D",
+      "config": {
+        "game": "leduc_poker",
+        "agent_source": "neupl",
+        "encoder_type": "reconstruction-autoencoder",
+        "player_id": 0,
+        "task": "task_d",
+        "task_d_predictor_type": "linear",
+        "neupl_use_randall_loss": true,
+        "neupl_num_policies": 1000
+      },
+      "results": [
+        {
+          "mse": 0.031572334468364716,
+          "baseline_mse": 0.05034957081079483
+        },
+        {
+          "mse": 0.015177576802670956,
+          "baseline_mse": 0.016280047595500946
+        },
+        {
+          "mse": 0.07323049753904343,
+          "baseline_mse": 0.07963582128286362
+        }
+      ]
+    },
+    {
+      "experiment_label": "leduc_poker neupl p1 randloss=True N=1000 Task A",
+      "config": {
+        "game": "leduc_poker",
+        "agent_source": "neupl",
+        "encoder_type": "reconstruction-autoencoder",
+        "player_id": 1,
+        "task": "task_a",
+        "task_a_predictor_type": "linear",
+        "neupl_use_randall_loss": true,
+        "neupl_num_policies": 1000
+      },
+      "results": [
+        {
+          "mse": 0.27082569174273446,
+          "baseline_mse": 0.2582988440990448
+        },
+        {
+          "mse": 0.3078293314770077,
+          "baseline_mse": 0.2919049561023712
+        },
+        {
+          "mse": 0.3058204139868959,
+          "baseline_mse": 0.2964026927947998
+        }
+      ]
+    },
+    {
+      "experiment_label": "leduc_poker neupl p1 randloss=True N=1000 Task D",
+      "config": {
+        "game": "leduc_poker",
+        "agent_source": "neupl",
+        "encoder_type": "reconstruction-autoencoder",
+        "player_id": 1,
+        "task": "task_d",
+        "task_d_predictor_type": "linear",
+        "neupl_use_randall_loss": true,
+        "neupl_num_policies": 1000
+      },
+      "results": [
+        {
+          "mse": 0.0023179834242910147,
+          "baseline_mse": 0.011190099641680717
+        },
+        {
+          "mse": 0.0021568606607615948,
+          "baseline_mse": 0.01396261528134346
+        },
+        {
+          "mse": 0.003491137409582734,
+          "baseline_mse": 0.02700764685869217
+        }
+      ]
+    },
+    {
+      "experiment_label": "leduc_poker neupl p0 randloss=False N=1000 Task A",
+      "config": {
+        "game": "leduc_poker",
+        "agent_source": "neupl",
+        "encoder_type": "reconstruction-autoencoder",
+        "player_id": 0,
+        "task": "task_a",
+        "task_a_predictor_type": "linear",
+        "neupl_use_randall_loss": false,
+        "neupl_num_policies": 1000
+      },
+      "results": [
+        {
+          "mse": 0.2930577113039064,
+          "baseline_mse": 0.36403563618659973
+        },
+        {
+          "mse": 0.2328782012173015,
+          "baseline_mse": 0.37888917326927185
+        },
+        {
+          "mse": 0.3142155872889883,
+          "baseline_mse": 0.32246169447898865
+        }
+      ]
+    },
+    {
+      "experiment_label": "leduc_poker neupl p0 randloss=False N=1000 Task D",
+      "config": {
+        "game": "leduc_poker",
+        "agent_source": "neupl",
+        "encoder_type": "reconstruction-autoencoder",
+        "player_id": 0,
+        "task": "task_d",
+        "task_d_predictor_type": "linear",
+        "neupl_use_randall_loss": false,
+        "neupl_num_policies": 1000
+      },
+      "results": [
+        {
+          "mse": 0.046749092638492584,
+          "baseline_mse": 0.07301712036132812
+        },
+        {
+          "mse": 0.06593004614114761,
+          "baseline_mse": 0.15367530286312103
+        },
+        {
+          "mse": 0.005803094711154699,
+          "baseline_mse": 0.018587151542305946
+        }
+      ]
+    },
+    {
+      "experiment_label": "leduc_poker neupl p1 randloss=False N=1000 Task A",
+      "config": {
+        "game": "leduc_poker",
+        "agent_source": "neupl",
+        "encoder_type": "reconstruction-autoencoder",
+        "player_id": 1,
+        "task": "task_a",
+        "task_a_predictor_type": "linear",
+        "neupl_use_randall_loss": false,
+        "neupl_num_policies": 1000
+      },
+      "results": [
+        {
+          "mse": 0.2614190070246487,
+          "baseline_mse": 0.26326245069503784
+        },
+        {
+          "mse": 0.22333195453203042,
+          "baseline_mse": 0.27533861994743347
+        },
+        {
+          "mse": 0.2244147534175531,
+          "baseline_mse": 0.24393798410892487
+        }
+      ]
+    },
+    {
+      "experiment_label": "leduc_poker neupl p1 randloss=False N=1000 Task D",
+      "config": {
+        "game": "leduc_poker",
+        "agent_source": "neupl",
+        "encoder_type": "reconstruction-autoencoder",
+        "player_id": 1,
+        "task": "task_d",
+        "task_d_predictor_type": "linear",
+        "neupl_use_randall_loss": false,
+        "neupl_num_policies": 1000
+      },
+      "results": [
+        {
+          "mse": 0.005907891318202019,
+          "baseline_mse": 0.02910139411687851
+        },
+        {
+          "mse": 0.006058727391064167,
+          "baseline_mse": 0.03794877231121063
+        },
+        {
+          "mse": 0.002835094928741455,
+          "baseline_mse": 0.009317428804934025
+        }
+      ]
+    }
+  ]
+}

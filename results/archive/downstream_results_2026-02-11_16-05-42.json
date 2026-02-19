@@ -1,0 +1,212 @@
+{
+  "run": [
+    {
+      "experiment_label": "leduc_poker neupl p0 randloss=True N=1000 Task A",
+      "config": {
+        "game": "leduc_poker",
+        "agent_source": "neupl",
+        "player_id": 0,
+        "task": "task_a",
+        "task_a_predictor_type": "random_forest",
+        "neupl_use_randall_loss": true,
+        "neupl_num_policies": 1000
+      },
+      "results": [
+        {
+          "mse": 0.260518298227149,
+          "baseline_mse": 0.3146058917045593
+        },
+        {
+          "mse": 0.26039125806654384,
+          "baseline_mse": 0.2983112335205078
+        },
+        {
+          "mse": 0.2610263655225609,
+          "baseline_mse": 0.3771514892578125
+        }
+      ]
+    },
+    {
+      "experiment_label": "leduc_poker neupl p0 randloss=True N=1000 Task D",
+      "config": {
+        "game": "leduc_poker",
+        "agent_source": "neupl",
+        "player_id": 0,
+        "task": "task_d",
+        "task_d_predictor_type": "random_forest",
+        "neupl_use_randall_loss": true,
+        "neupl_num_policies": 1000
+      },
+      "results": [
+        {
+          "mse": 0.013849380426108837,
+          "baseline_mse": 0.04515521973371506
+        },
+        {
+          "mse": 0.01728253997862339,
+          "baseline_mse": 0.020156528800725937
+        },
+        {
+          "mse": 0.07130800187587738,
+          "baseline_mse": 0.07028059661388397
+        }
+      ]
+    },
+    {
+      "experiment_label": "leduc_poker neupl p1 randloss=True N=1000 Task A",
+      "config": {
+        "game": "leduc_poker",
+        "agent_source": "neupl",
+        "player_id": 1,
+        "task": "task_a",
+        "task_a_predictor_type": "random_forest",
+        "neupl_use_randall_loss": true,
+        "neupl_num_policies": 1000
+      },
+      "results": [
+        {
+          "mse": 0.28047833484796975,
+          "baseline_mse": 0.2818310558795929
+        },
+        {
+          "mse": 0.2878114935807783,
+          "baseline_mse": 0.28071343898773193
+        },
+        {
+          "mse": 0.27272204364836455,
+          "baseline_mse": 0.26822537183761597
+        }
+      ]
+    },
+    {
+      "experiment_label": "leduc_poker neupl p1 randloss=True N=1000 Task D",
+      "config": {
+        "game": "leduc_poker",
+        "agent_source": "neupl",
+        "player_id": 1,
+        "task": "task_d",
+        "task_d_predictor_type": "random_forest",
+        "neupl_use_randall_loss": true,
+        "neupl_num_policies": 1000
+      },
+      "results": [
+        {
+          "mse": 0.0017584982560947537,
+          "baseline_mse": 0.012833595275878906
+        },
+        {
+          "mse": 0.0021049506030976772,
+          "baseline_mse": 0.014444644562900066
+        },
+        {
+          "mse": 0.0035344117786735296,
+          "baseline_mse": 0.02578214555978775
+        }
+      ]
+    },
+    {
+      "experiment_label": "leduc_poker neupl p0 randloss=False N=1000 Task A",
+      "config": {
+        "game": "leduc_poker",
+        "agent_source": "neupl",
+        "player_id": 0,
+        "task": "task_a",
+        "task_a_predictor_type": "random_forest",
+        "neupl_use_randall_loss": false,
+        "neupl_num_policies": 1000
+      },
+      "results": [
+        {
+          "mse": 0.2945054711259331,
+          "baseline_mse": 0.351296603679657
+        },
+        {
+          "mse": 0.28163691818627223,
+          "baseline_mse": 0.3861069977283478
+        },
+        {
+          "mse": 0.2549429927271894,
+          "baseline_mse": 0.260711133480072
+        }
+      ]
+    },
+    {
+      "experiment_label": "leduc_poker neupl p0 randloss=False N=1000 Task D",
+      "config": {
+        "game": "leduc_poker",
+        "agent_source": "neupl",
+        "player_id": 0,
+        "task": "task_d",
+        "task_d_predictor_type": "random_forest",
+        "neupl_use_randall_loss": false,
+        "neupl_num_policies": 1000
+      },
+      "results": [
+        {
+          "mse": 0.029354220256209373,
+          "baseline_mse": 0.07106677442789078
+        },
+        {
+          "mse": 0.04534660652279854,
+          "baseline_mse": 0.15062172710895538
+        },
+        {
+          "mse": 0.006002137437462807,
+          "baseline_mse": 0.017172258347272873
+        }
+      ]
+    },
+    {
+      "experiment_label": "leduc_poker neupl p1 randloss=False N=1000 Task A",
+      "config": {
+        "game": "leduc_poker",
+        "agent_source": "neupl",
+        "player_id": 1,
+        "task": "task_a",
+        "task_a_predictor_type": "random_forest",
+        "neupl_use_randall_loss": false,
+        "neupl_num_policies": 1000
+      },
+      "results": [
+        {
+          "mse": 0.299106391087517,
+          "baseline_mse": 0.2988184988498688
+        },
+        {
+          "mse": 0.2364530551831313,
+          "baseline_mse": 0.22932393848896027
+        },
+        {
+          "mse": 0.2894163914101149,
+          "baseline_mse": 0.2796688973903656
+        }
+      ]
+    },
+    {
+      "experiment_label": "leduc_poker neupl p1 randloss=False N=1000 Task D",
+      "config": {
+        "game": "leduc_poker",
+        "agent_source": "neupl",
+        "player_id": 1,
+        "task": "task_d",
+        "task_d_predictor_type": "random_forest",
+        "neupl_use_randall_loss": false,
+        "neupl_num_policies": 1000
+      },
+      "results": [
+        {
+          "mse": 0.006087583489716053,
+          "baseline_mse": 0.031181883066892624
+        },
+        {
+          "mse": 0.0067975143902003765,
+          "baseline_mse": 0.04033215343952179
+        },
+        {
+          "mse": 0.003176265861839056,
+          "baseline_mse": 0.011765602044761181
+        }
+      ]
+    }
+  ]
+}

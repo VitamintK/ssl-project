@@ -105,7 +105,7 @@ def get_expected_payoffs_agent(game: pyspiel.Game, p0_ppo_agent: ppo.PPOAgent, p
 def get_expected_payoffs(game: pyspiel.Game, p0_policy: policy.Policy, p1_policy: policy.Policy) -> float:
     policies = [p0_policy, p1_policy]
     payoffs = []
-    for i in range(100):
+    for i in range(150):
         payoff = sample_episode(game.new_initial_state(), policies)[0]
         payoffs.append(payoff)
     return np.mean(payoffs)

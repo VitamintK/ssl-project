@@ -7,6 +7,7 @@ import pyspiel
 from pathlib import Path
 import logging
 import numpy as np
+from datetime import datetime
 
 from open_spiel.python import policy as policy_lib
 from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
@@ -26,22 +27,76 @@ from weight_autoencoder import (
     load_autoencoder,
 )
 
-results = defaultdict(list)
-def register_result(config, mse, baseline_mse):
-    # If mse or baseline_mse are tensors, convert to float using .item()
+results = {'run': []}
+run_start_time = None
+
+
+def register_result(experiment_label: str, config_dict: dict, mse, baseline_mse):
+    """
+    Register a result for an experiment.
+
+    Args:
+        experiment_label: String label for the experiment
+        config_dict: Dictionary with config parameters (prefixed for method-specific params)
+        mse: Mean squared error
+        baseline_mse: Baseline mean squared error
+    """
+    # Convert tensors to floats
     if hasattr(mse, "item"):
         mse = mse.item()
     if hasattr(baseline_mse, "item"):
         baseline_mse = baseline_mse.item()
-    results[config].append((mse, baseline_mse))
+
+    # Find existing run with same experiment_label
+    existing_run = None
+    for run in results['run']:
+        if run['experiment_label'] == experiment_label:
+            existing_run = run
+            break
+
+    if existing_run:
+        # Append to existing results
+        existing_run['results'].append({
+            'mse': mse,
+            'baseline_mse': baseline_mse
+        })
+    else:
+        # Create new run entry
+        results['run'].append({
+            'experiment_label': experiment_label,
+            'config': config_dict,
+            'results': [{
+                'mse': mse,
+                'baseline_mse': baseline_mse
+            }]
+        })
+
 
 def save_results():
-    for config, result in results.items():
-        print(config)
-        for mse, baseline_mse in result:
-            print(f'{mse:.6f},{baseline_mse:.6f}')
+    """Save results to both main file and timestamped archive."""
+    # Print summary
+    for run in results['run']:
+        print(run['experiment_label'])
+        for result in run['results']:
+            print(f"{result['mse']:.6f},{result['baseline_mse']:.6f}")
+
+    # Save to main file
     with open('results/all_downstream_tasks.json', 'w') as f:
-        json.dump(results, f)
+        json.dump(results, f, indent=2)
+
+    # Save to archive with timestamp
+    archive_dir = Path("results/archive")
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = run_start_time.strftime("%Y-%m-%d_%H-%M-%S")
+    archive_path = archive_dir / f"downstream_results_{timestamp}.json"
+
+    with open(archive_path, 'w') as f:
+        json.dump(results, f, indent=2)
+
+    print(f"\nResults saved to:")
+    print(f"  - results/all_downstream_tasks.json")
+    print(f"  - {archive_path}")
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -285,11 +340,8 @@ def test_downstream_task_a(
 
     # Compute baseline (predict mean of training set)
     val_payoffs = predictor.ground_truth_payoffs[predictor.val_indices]
-    if predictor_type == "random_forest":
-        val_payoffs = val_payoffs[:, 0]  # Extract p1 payoffs for RF
+    # Note: ground_truth_payoffs is already 1D for single opponent case
     train_payoffs = predictor.ground_truth_payoffs[predictor.train_indices]
-    if predictor_type == "random_forest":
-        train_payoffs = train_payoffs[:, 0]  # Extract p1 payoffs for RF
     mean_payoff2 = np.mean(train_payoffs)
     baseline_mse2 = np.mean((val_payoffs - mean_payoff2) ** 2)
     
@@ -323,10 +375,11 @@ def test_downstream_task_a_(
         game: pyspiel.Game,
         policies: list[policy_lib.Policy],
         embeddings: list[np.ndarray],
-        predictor_type: Literal["mlp", "linear"],
+        predictor_type: Literal["mlp", "linear", "random_forest"],
         exp_label: str = "downstream_a_neupl",
         predictor_dropout: float = 0.0,
         device: str = "cpu",
+        config: Optional[dict] = None,
 ):
     game_short_name = game.get_type().short_name
     opponent_policy = policy_lib.UniformRandomPolicy(game)
@@ -334,6 +387,8 @@ def test_downstream_task_a_(
         hidden_dims = [128, 64, 32]
     elif predictor_type == "linear":
         hidden_dims = []
+    elif predictor_type == "random_forest":
+        hidden_dims = None  # Not used for random forest
     else:
         raise ValueError(f"Invalid predictor type: {predictor_type}")
 
@@ -343,6 +398,7 @@ def test_downstream_task_a_(
         p2_policies=[opponent_policy],
         p1_embeddings=embeddings,
         p2_embeddings=[np.array([0])],
+        model_type=predictor_type,
         hidden_dims=hidden_dims,
         dropout=predictor_dropout,
         device=device
@@ -356,6 +412,8 @@ def test_downstream_task_a_(
         verbose=True
     )
 
+    get_feel_for_values(predictor.ground_truth_payoffs, label="Ground Truth Payoffs (Task A)")
+
     # Evaluate payoff predictor on validation set
     print("\nEvaluating model on validation set...")
     val_metrics = predictor.evaluate(eval_set="val")
@@ -366,6 +424,7 @@ def test_downstream_task_a_(
 
     # Baseline: predict mean for everything (validation set)
     val_payoffs = predictor.ground_truth_payoffs[predictor.val_indices]
+    # Note: ground_truth_payoffs is already 1D for single opponent case
     mean_payoff = np.mean(val_payoffs)
     baseline_mse = np.mean((val_payoffs - mean_payoff) ** 2)
     # baseline_mae = np.mean(np.abs(val_payoffs - mean_payoff))
@@ -390,7 +449,15 @@ def test_downstream_task_a_(
     print(f"MSE: {train_metrics['mse']:.6f}")
     print(f"MAE: {train_metrics['mae']:.6f}")
 
-    register_result(exp_label, val_metrics['mse'], baseline_mse2)
+    # Use provided config or create minimal default
+    if config is None:
+        config = {
+            'game': game_short_name,
+            'task': 'task_a',
+            'task_a_predictor_type': predictor_type,
+        }
+
+    register_result(exp_label, config, val_metrics['mse'], baseline_mse2)
 
     # Save the payoff predictor model
     results_dir = Path("results") / exp_label
@@ -756,6 +823,7 @@ def test_downstream_task_d(
         predictor_type: Literal["mlp", "linear"],
         exp_label: str = "downstream_d",
         device: str = "cpu",
+        config: Optional[dict] = None,
 ):
     """
     Test the ExploitabilityPredictorTrainer with exploitability predictions.
@@ -795,7 +863,17 @@ def test_downstream_task_d(
     logger.info(f"Baseline (constant mean prediction): {baseline_mse:.6f}")
     logger.info(f"MSE reduction: {(1 - val_metrics['mse']/baseline_mse)*100:.2f}%")
     print(f"MAE reduction: {(1 - val_metrics['mae']/baseline_mae)*100:.2f}%")
-    register_result(exp_label, val_metrics['mse'], baseline_mse)
+
+    # Use provided config or create minimal default
+    if config is None:
+        config = {
+            'game': game_short_name,
+            'player_id': player_id,
+            'task': 'task_d',
+            'task_d_predictor_type': predictor_type,
+        }
+
+    register_result(exp_label, config, val_metrics['mse'], baseline_mse)
 
 def get_policies_and_embeddings(game, player_id: int, ppo_agents: list[PPOAgent], experiment_label: str, game_short_name: str, device: str):
     print("\nTraining autoencoder on agent weights...")
@@ -915,6 +993,10 @@ if __name__ == "__main__":
     RUN_NEUPL = True
     RUN_PSRO = False
     RUN_RANDOM = False
+
+    # Initialize run start time
+    run_start_time = datetime.now()
+
     device = get_device_string()
     print("Using device:", device)
     # game = pyspiel.load_game("kuhn_poker")
@@ -931,6 +1013,7 @@ if __name__ == "__main__":
                 N = 1000 # 1500 or 3000 works fine for kuhn
                 NEUPL_SAMPLING_MODE = "gaussian"
                 INTERPOLATE_PRENORM = True
+                PREDICTOR_TYPE = 'random_forest'
                 neupl_config = {
                     'use_randall_loss': use_randall_loss,
                     'hidden_size': 256,
@@ -951,11 +1034,48 @@ if __name__ == "__main__":
                     if RUN_TASK_A:
                         exp_label = f'{game_short_name} neupl p{player_id} randloss={use_randall_loss} N={N} Task A'
                         logger.info(f"--Running task: NEUPL {game_short_name} player_id={player_id} use_randall_loss={use_randall_loss} Task A")
-                        test_downstream_task_a_(game, exp_label=exp_label, policies=policies, embeddings=embeddings, predictor_type="linear", device=device)
+                        test_downstream_task_a_(
+                            game,
+                            exp_label=exp_label,
+                            policies=policies,
+                            embeddings=embeddings,
+                            predictor_type=PREDICTOR_TYPE,
+                            device=device,
+                            config={
+                                'game': game_short_name,
+                                'agent_source': 'neupl',
+                                'player_id': player_id,
+                                'task': 'task_a',
+                                'task_a_predictor_type': PREDICTOR_TYPE,
+                                'neupl_use_randall_loss': use_randall_loss,
+                                'neupl_interpolate_prenorm': INTERPOLATE_PRENORM,
+                                'neupl_sampling_mode': NEUPL_SAMPLING_MODE,
+                                'neupl_num_policies': N
+                            }
+                        )
                     if RUN_TASK_D:
                         exp_label = f'{game_short_name} neupl p{player_id} randloss={use_randall_loss} N={N} Task D'
                         logger.info(f"--Running task: NEUPL {game_short_name} player_id={player_id} use_randall_loss={use_randall_loss} Task D")
-                        test_downstream_task_d(game_short_name, exp_label=exp_label, player_id=player_id, policies=policies, embeddings=embeddings, predictor_type="linear", device=device)
+                        test_downstream_task_d(
+                            game_short_name,
+                            exp_label=exp_label,
+                            player_id=player_id,
+                            policies=policies,
+                            embeddings=embeddings,
+                            predictor_type=PREDICTOR_TYPE,
+                            device=device,
+                            config={
+                                'game': game_short_name,
+                                'agent_source': 'neupl',
+                                'player_id': player_id,
+                                'task': 'task_d',
+                                'task_d_predictor_type': PREDICTOR_TYPE,
+                                'neupl_use_randall_loss': use_randall_loss,
+                                'neupl_interpolate_prenorm': INTERPOLATE_PRENORM,
+                                'neupl_sampling_mode': NEUPL_SAMPLING_MODE,
+                                'neupl_num_policies': N
+                            }
+                        )
         if RUN_PSRO:
             for player_id in range(2):
             # logger.info(f"--Running tasks: PSRO {game_short_name} player_id={player_id}")
@@ -965,17 +1085,79 @@ if __name__ == "__main__":
                 if RUN_TASK_A:
                     exp_label = f'{game_short_name} psro {player_id} reconstruction-autoencoder Task A'
                     logger.info(f"--Running task: PSRO {game_short_name} player_id={player_id} reconstruction-autoencoder Task A")
-                    test_downstream_task_a_(game, exp_label=exp_label, policies=policies, embeddings=embeddings, predictor_type="linear", device=device)
+                    test_downstream_task_a_(
+                        game,
+                        exp_label=exp_label,
+                        policies=policies,
+                        embeddings=embeddings,
+                        predictor_type="linear",
+                        device=device,
+                        config={
+                            'game': game_short_name,
+                            'agent_source': 'psro',
+                            'encoder_type': 'reconstruction-autoencoder',
+                            'player_id': player_id,
+                            'task': 'task_a',
+                            'task_a_predictor_type': 'linear'
+                        }
+                    )
                     exp_label = f'{game_short_name} psro {player_id} identity Task A'
                     logger.info(f"--Running task: PSRO {game_short_name} player_id={player_id} identity Task A")
-                    test_downstream_task_a_(game, exp_label=exp_label, policies=policies, embeddings=identity_embeddings, predictor_type="linear", device=device)
+                    test_downstream_task_a_(
+                        game,
+                        exp_label=exp_label,
+                        policies=policies,
+                        embeddings=identity_embeddings,
+                        predictor_type="linear",
+                        device=device,
+                        config={
+                            'game': game_short_name,
+                            'agent_source': 'psro',
+                            'encoder_type': 'identity',
+                            'player_id': player_id,
+                            'task': 'task_a',
+                            'task_a_predictor_type': 'linear'
+                        }
+                    )
                 if RUN_TASK_D:
                     exp_label = f'{game_short_name} psro {player_id} reconstruction-autoencoder Task D'
                     logger.info(f"--Running task: PSRO {game_short_name} player_id={player_id} reconstruction-autoencoder Task D")
-                    test_downstream_task_d(game_short_name, exp_label=exp_label, player_id=player_id, policies=policies, embeddings=embeddings, predictor_type="linear", device=device)
+                    test_downstream_task_d(
+                        game_short_name,
+                        exp_label=exp_label,
+                        player_id=player_id,
+                        policies=policies,
+                        embeddings=embeddings,
+                        predictor_type="linear",
+                        device=device,
+                        config={
+                            'game': game_short_name,
+                            'agent_source': 'psro',
+                            'encoder_type': 'reconstruction-autoencoder',
+                            'player_id': player_id,
+                            'task': 'task_d',
+                            'task_d_predictor_type': 'linear'
+                        }
+                    )
                     exp_label = f'{game_short_name} psro {player_id} identity Task D'
                     logger.info(f"--Running task: PSRO {game_short_name} player_id={player_id} identity Task D")
-                    test_downstream_task_d(game_short_name, exp_label=exp_label, player_id=player_id, policies=policies, embeddings=identity_embeddings, predictor_type="linear", device=device)
+                    test_downstream_task_d(
+                        game_short_name,
+                        exp_label=exp_label,
+                        player_id=player_id,
+                        policies=policies,
+                        embeddings=identity_embeddings,
+                        predictor_type="linear",
+                        device=device,
+                        config={
+                            'game': game_short_name,
+                            'agent_source': 'psro',
+                            'encoder_type': 'identity',
+                            'player_id': player_id,
+                            'task': 'task_d',
+                            'task_d_predictor_type': 'linear'
+                        }
+                    )
         if RUN_RANDOM:
             N = 1000
             ppo_agents = [PPOAgent(num_actions, info_state_size, 'cpu', layer_init, 256) for _ in range(N)]
@@ -985,15 +1167,77 @@ if __name__ == "__main__":
             if RUN_TASK_A:
                 exp_label = f'{game_short_name} ppo random {player_id} reconstruction-autoencoder Task A'
                 logger.info(f"--Running task: PPO random {game_short_name} reconstruction-autoencoder Task A")
-                test_downstream_task_a_(game, exp_label=exp_label, policies=policies, embeddings=embeddings, predictor_type="linear", device=device)
+                test_downstream_task_a_(
+                    game,
+                    exp_label=exp_label,
+                    policies=policies,
+                    embeddings=embeddings,
+                    predictor_type="linear",
+                    device=device,
+                    config={
+                        'game': game_short_name,
+                        'agent_source': 'ppo_random',
+                        'encoder_type': 'reconstruction-autoencoder',
+                        'player_id': player_id,
+                        'task': 'task_a',
+                        'task_a_predictor_type': 'linear'
+                    }
+                )
                 exp_label = f'{game_short_name} ppo random {player_id} identity Task A'
                 logger.info(f"--Running task: PPO random {game_short_name} identity Task A")
-                test_downstream_task_a_(game, exp_label=exp_label, policies=policies, embeddings=identity_embeddings, predictor_type="linear", device=device)
+                test_downstream_task_a_(
+                    game,
+                    exp_label=exp_label,
+                    policies=policies,
+                    embeddings=identity_embeddings,
+                    predictor_type="linear",
+                    device=device,
+                    config={
+                        'game': game_short_name,
+                        'agent_source': 'ppo_random',
+                        'encoder_type': 'identity',
+                        'player_id': player_id,
+                        'task': 'task_a',
+                        'task_a_predictor_type': 'linear'
+                    }
+                )
             if RUN_TASK_D:
                 exp_label = f'{game_short_name} ppo random {player_id} reconstruction-autoencoder Task D'
                 logger.info(f"--Running task: PPO random {game_short_name} reconstruction-autoencoder Task D")
-                test_downstream_task_d(game_short_name, exp_label=exp_label, player_id=player_id, policies=policies, embeddings=embeddings, predictor_type="linear", device=device)
+                test_downstream_task_d(
+                    game_short_name,
+                    exp_label=exp_label,
+                    player_id=player_id,
+                    policies=policies,
+                    embeddings=embeddings,
+                    predictor_type="linear",
+                    device=device,
+                    config={
+                        'game': game_short_name,
+                        'agent_source': 'ppo_random',
+                        'encoder_type': 'reconstruction-autoencoder',
+                        'player_id': player_id,
+                        'task': 'task_d',
+                        'task_d_predictor_type': 'linear'
+                    }
+                )
                 exp_label = f'{game_short_name} ppo random {player_id} identity Task D'
                 logger.info(f"--Running task: PPO random {game_short_name} identity Task D")
-                test_downstream_task_d(game_short_name, exp_label=exp_label, player_id=player_id, policies=policies, embeddings=identity_embeddings, predictor_type="linear", device=device)
+                test_downstream_task_d(
+                    game_short_name,
+                    exp_label=exp_label,
+                    player_id=player_id,
+                    policies=policies,
+                    embeddings=identity_embeddings,
+                    predictor_type="linear",
+                    device=device,
+                    config={
+                        'game': game_short_name,
+                        'agent_source': 'ppo_random',
+                        'encoder_type': 'identity',
+                        'player_id': player_id,
+                        'task': 'task_d',
+                        'task_d_predictor_type': 'linear'
+                    }
+                )
     save_results()

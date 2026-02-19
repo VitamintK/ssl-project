@@ -1,96 +1,96 @@
 --Running task: NEUPL leduc_poker player_id=0 use_randall_loss=True Task A
-MSE: 0.261823
-Baseline (constant prediction w/train mean): 0.303532 MSE
-MSE reduction: 13.74%
+MSE: 0.260518
+Baseline (constant prediction w/train mean): 0.314606 MSE
+MSE reduction: 17.19%
 --Running task: NEUPL leduc_poker player_id=0 use_randall_loss=True Task D
-MSE: 0.012067
-Baseline (constant mean prediction): 0.045423
-MSE reduction: 73.43%
+MSE: 0.013849
+Baseline (constant mean prediction): 0.045155
+MSE reduction: 69.33%
 --Running task: NEUPL leduc_poker player_id=1 use_randall_loss=True Task A
-MSE: 0.305382
-Baseline (constant prediction w/train mean): 0.306314 MSE
-MSE reduction: 0.30%
+MSE: 0.280478
+Baseline (constant prediction w/train mean): 0.281831 MSE
+MSE reduction: 0.48%
 --Running task: NEUPL leduc_poker player_id=1 use_randall_loss=True Task D
-MSE: 0.002696
-Baseline (constant mean prediction): 0.011606
-MSE reduction: 76.77%
+MSE: 0.001758
+Baseline (constant mean prediction): 0.012834
+MSE reduction: 86.30%
 --Running task: NEUPL leduc_poker player_id=0 use_randall_loss=False Task A
-MSE: 0.277250
-Baseline (constant prediction w/train mean): 0.354007 MSE
-MSE reduction: 21.68%
+MSE: 0.294505
+Baseline (constant prediction w/train mean): 0.351297 MSE
+MSE reduction: 16.17%
 --Running task: NEUPL leduc_poker player_id=0 use_randall_loss=False Task D
-MSE: 0.033978
-Baseline (constant mean prediction): 0.062506
-MSE reduction: 45.64%
+MSE: 0.029354
+Baseline (constant mean prediction): 0.071067
+MSE reduction: 58.69%
 --Running task: NEUPL leduc_poker player_id=1 use_randall_loss=False Task A
-MSE: 0.299004
-Baseline (constant prediction w/train mean): 0.313731 MSE
-MSE reduction: 4.69%
+MSE: 0.299106
+Baseline (constant prediction w/train mean): 0.298818 MSE
+MSE reduction: -0.10%
 --Running task: NEUPL leduc_poker player_id=1 use_randall_loss=False Task D
-MSE: 0.005814
-Baseline (constant mean prediction): 0.029033
-MSE reduction: 79.97%
+MSE: 0.006088
+Baseline (constant mean prediction): 0.031182
+MSE reduction: 80.48%
 --Running task: NEUPL leduc_poker player_id=0 use_randall_loss=True Task A
-MSE: 0.285649
-Baseline (constant prediction w/train mean): 0.346308 MSE
-MSE reduction: 17.52%
+MSE: 0.260391
+Baseline (constant prediction w/train mean): 0.298311 MSE
+MSE reduction: 12.71%
 --Running task: NEUPL leduc_poker player_id=0 use_randall_loss=True Task D
-MSE: 0.022563
-Baseline (constant mean prediction): 0.026404
-MSE reduction: 14.54%
+MSE: 0.017283
+Baseline (constant mean prediction): 0.020157
+MSE reduction: 14.26%
 --Running task: NEUPL leduc_poker player_id=1 use_randall_loss=True Task A
-MSE: 0.224706
-Baseline (constant prediction w/train mean): 0.226376 MSE
-MSE reduction: 0.74%
+MSE: 0.287811
+Baseline (constant prediction w/train mean): 0.280713 MSE
+MSE reduction: -2.53%
 --Running task: NEUPL leduc_poker player_id=1 use_randall_loss=True Task D
-MSE: 0.002083
-Baseline (constant mean prediction): 0.013785
-MSE reduction: 84.89%
+MSE: 0.002105
+Baseline (constant mean prediction): 0.014445
+MSE reduction: 85.43%
 --Running task: NEUPL leduc_poker player_id=0 use_randall_loss=False Task A
-MSE: 0.286231
-Baseline (constant prediction w/train mean): 0.391588 MSE
-MSE reduction: 26.90%
+MSE: 0.281637
+Baseline (constant prediction w/train mean): 0.386107 MSE
+MSE reduction: 27.06%
 --Running task: NEUPL leduc_poker player_id=0 use_randall_loss=False Task D
-MSE: 0.072946
-Baseline (constant mean prediction): 0.151324
-MSE reduction: 51.80%
+MSE: 0.045347
+Baseline (constant mean prediction): 0.150622
+MSE reduction: 69.89%
 --Running task: NEUPL leduc_poker player_id=1 use_randall_loss=False Task A
-MSE: 0.263949
-Baseline (constant prediction w/train mean): 0.275260 MSE
-MSE reduction: 4.11%
+MSE: 0.236453
+Baseline (constant prediction w/train mean): 0.229324 MSE
+MSE reduction: -3.11%
 --Running task: NEUPL leduc_poker player_id=1 use_randall_loss=False Task D
-MSE: 0.008760
-Baseline (constant mean prediction): 0.037506
-MSE reduction: 76.64%
+MSE: 0.006798
+Baseline (constant mean prediction): 0.040332
+MSE reduction: 83.15%
 --Running task: NEUPL leduc_poker player_id=0 use_randall_loss=True Task A
-MSE: 0.281925
-Baseline (constant prediction w/train mean): 0.470766 MSE
-MSE reduction: 40.11%
+MSE: 0.261026
+Baseline (constant prediction w/train mean): 0.377151 MSE
+MSE reduction: 30.79%
 --Running task: NEUPL leduc_poker player_id=0 use_randall_loss=True Task D
-MSE: 0.101799
-Baseline (constant mean prediction): 0.101933
-MSE reduction: 0.13%
+MSE: 0.071308
+Baseline (constant mean prediction): 0.070281
+MSE reduction: -1.46%
 --Running task: NEUPL leduc_poker player_id=1 use_randall_loss=True Task A
-MSE: 0.292487
-Baseline (constant prediction w/train mean): 0.307986 MSE
-MSE reduction: 5.03%
+MSE: 0.272722
+Baseline (constant prediction w/train mean): 0.268225 MSE
+MSE reduction: -1.68%
 --Running task: NEUPL leduc_poker player_id=1 use_randall_loss=True Task D
-MSE: 0.003884
-Baseline (constant mean prediction): 0.031996
-MSE reduction: 87.86%
+MSE: 0.003534
+Baseline (constant mean prediction): 0.025782
+MSE reduction: 86.29%
 --Running task: NEUPL leduc_poker player_id=0 use_randall_loss=False Task A
-MSE: 0.210581
-Baseline (constant prediction w/train mean): 0.220087 MSE
-MSE reduction: 4.32%
+MSE: 0.254943
+Baseline (constant prediction w/train mean): 0.260711 MSE
+MSE reduction: 2.21%
 --Running task: NEUPL leduc_poker player_id=0 use_randall_loss=False Task D
-MSE: 0.006153
-Baseline (constant mean prediction): 0.023892
-MSE reduction: 74.25%
+MSE: 0.006002
+Baseline (constant mean prediction): 0.017172
+MSE reduction: 65.05%
 --Running task: NEUPL leduc_poker player_id=1 use_randall_loss=False Task A
-MSE: 0.247807
-Baseline (constant prediction w/train mean): 0.245826 MSE
-MSE reduction: -0.81%
+MSE: 0.289416
+Baseline (constant prediction w/train mean): 0.279669 MSE
+MSE reduction: -3.49%
 --Running task: NEUPL leduc_poker player_id=1 use_randall_loss=False Task D
-MSE: 0.002574
-Baseline (constant mean prediction): 0.009727
-MSE reduction: 73.54%
+MSE: 0.003176
+Baseline (constant mean prediction): 0.011766
+MSE reduction: 73.00%

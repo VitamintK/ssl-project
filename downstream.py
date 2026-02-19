@@ -299,9 +299,10 @@ class PayoffPredictor:
         if self.model_type == "random_forest":
             # Random Forest training with early stopping
             X_train = embeddings[train_indices]
-            y_train = self.ground_truth_payoffs[train_indices, 0]  # Payoffs for p1 vs opponent
+            # ground_truth_payoffs is already 1D (scalars from get_expected_payoffs)
+            y_train = self.ground_truth_payoffs[train_indices]
             X_val = embeddings[val_indices]
-            y_val = self.ground_truth_payoffs[val_indices, 0]
+            y_val = self.ground_truth_payoffs[val_indices]
 
             # Early stopping parameters
             best_val_mse = float('inf')
@@ -341,8 +342,7 @@ class PayoffPredictor:
                 else:
                     patience_counter += 1
                     if patience_counter >= patience:
-                        if verbose:
-                            print(f"Early stopping at n_estimators={n_trees} - validation MSE plateaued")
+                        print(f"Early stopping at n_estimators={n_trees} - validation MSE plateaued")
                         break
 
             self.model = best_rf_model
