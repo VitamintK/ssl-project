@@ -1,26 +1,33 @@
 """
-Downstream task: Train a model to predict expected payoff between PPO agents and a fixed policy.
+Downstream task predictors for self-supervised learning evaluation.
 
-PayoffPredictor:
-1. Takes PPO agents and encodes them using a custom encoder function
-2. Trains a model (neural network or random forest) to predict expected payoffs against a fixed opponent policy
-3. Can be used to evaluate agent performance without running full game simulations
+This module provides predictors for evaluating policy representations:
+1. ModelTrainer: Handles training/evaluation for all model types
+2. PayoffPredictorRefactored: Predicts expected payoffs between policies
+3. StatePayoffPredictorRefactored: Predicts state-conditioned payoffs
+4. ExploitabilityPredictorRefactored: Predicts policy exploitability
+
+Supports multiple model types: MLP, linear regression, and random forest.
+Uses composition pattern for clean separation of ML and domain logic.
 """
+
+from abc import ABC, abstractmethod
+from typing import List, Callable, Any, Optional, Literal
+from tqdm import tqdm
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import random
-from typing import List, Callable, Any, Optional, Literal
-from tqdm import tqdm
-
+import pyspiel
 from open_spiel.python.algorithms.psro_v2.abstract_meta_trainer import sample_episode
 from open_spiel.python.policy import Policy, UniformRandomPolicy
-import pyspiel
 from pyspiel import TabularBestResponse
 from open_spiel.python.algorithms import policy_utils, best_response
 from open_spiel.python.algorithms.psro_v2 import utils as psro_utils
+
+from config import ModelConfig
 from utils import PPOAgentPolicy, get_expected_payoffs
 
 # Import sklearn only when needed
@@ -33,6 +40,7 @@ except ImportError:
 
 
 def set_seed(seed=42):
+    """Set random seeds for reproducibility."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -40,9 +48,7 @@ def set_seed(seed=42):
 
 
 def get_state_tensor(state):
-    """
-    Concatenate both player's info for full state representation.
-    """
+    """Concatenate both player's info for full state representation."""
     state_tensor_p0 = state.information_state_tensor(0)
     state_tensor_p1 = state.information_state_tensor(1)
     return state_tensor_p0 + state_tensor_p1
@@ -91,6 +97,7 @@ def sample_random_states(game, num_states: int, max_depth: int = 10):
 
     return states
 
+
 class PayoffModel(nn.Module):
     """Simple MLP to predict payoffs from agent embeddings."""
 
@@ -98,77 +105,64 @@ class PayoffModel(nn.Module):
         super().__init__()
         if hidden_dims is None:
             hidden_dims = [128, 64, 32]
+
         layers = []
-        prev_dim = embedding_dim
+        in_dim = embedding_dim
+
         for hidden_dim in hidden_dims:
-            layers.extend([
-                nn.Linear(prev_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout)
-            ])
-            prev_dim = hidden_dim
-        # Output layer
-        layers.append(nn.Linear(prev_dim, 1))
+            layers.append(nn.Linear(in_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+            in_dim = hidden_dim
+
+        layers.append(nn.Linear(in_dim, 1))
         self.network = nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.network(x).squeeze(-1)
 
-class PayoffPredictor:
-    """
-    Trains a model to predict expected payoff between PPO agents and a fixed policy.
 
-    Pipeline:
-    - Encoding PPO agents into embeddings
-    - Generating training data using ground-truth payoff calculations
-    - Training a regression model (neural network or random forest) to predict payoffs from embeddings
-    - Evaluating the trained model
+class ModelTrainer:
+    """
+    Handles model training and evaluation for all predictor types.
+
+    Provides a unified interface for training MLP, linear, and random forest models.
+    Predictors delegate ML operations to this class, focusing on domain logic themselves.
     """
 
     def __init__(
         self,
-        game,
-        p1_policies: list[Policy],
-        p2_policies: list[Policy],
-        p1_embeddings: list[np.ndarray],
-        p2_embeddings: list[np.ndarray],
-        model_type: Literal["mlp", "linear", "random_forest"] = "mlp",
-        hidden_dims: Optional[List[int]] = None,
-        dropout: float = 0.0,
+        embedding_dim: int,
+        model_config: ModelConfig,
         device: str = "cpu"
     ):
         """
-        Initialize the PayoffPredictor.
+        Initialize model trainer.
 
         Args:
-            game: OpenSpiel game instance
-            p1_policies: List of P1 policies
-            p2_policies: List of P2 policies (can be a single-element list for fixed opponent)
-            p1_embeddings: P1 agent embeddings
-            p2_embeddings: P2 agent embeddings
-            model_type: Type of model to use ("mlp", "linear", or "random_forest")
-            hidden_dims: Hidden layer dimensions for neural network models (ignored for random_forest)
-            dropout: Dropout rate for neural network models (ignored for random_forest)
-            device: cpu or cuda
+            embedding_dim: Dimension of input embeddings
+            model_config: Model configuration (type, hyperparameters)
+            device: Device for computation (cpu, cuda, mps)
         """
-        self.game = game
-        self.p1_policies = p1_policies
-        self.p2_policies = p2_policies
+        self.embedding_dim = embedding_dim
+        self.model_config = model_config
         self.device = device
-        self.model_type = model_type
-        self.p1_embeddings = np.array(p1_embeddings)
-        self.p2_embeddings = np.array(p2_embeddings)
+        self.model = self._create_model()
+        self.train_indices = None
+        self.val_indices = None
 
-        # Concatenate P1 and P2 embeddings for input
-        self.embedding_dim = self.p1_embeddings.shape[1] + self.p2_embeddings.shape[1]
+    def _create_model(self):
+        """
+        Factory method: Create model based on config.
 
-        # Initialize the predictor model based on type
-        if model_type == "random_forest":
+        Returns:
+            Model instance (RandomForestRegressor or PayoffModel)
+        """
+        if self.model_config.model_type == "random_forest":
             if not SKLEARN_AVAILABLE:
                 raise ImportError("sklearn is required for random_forest model type")
-            # Initialize Random Forest with default parameters
-            # Will be replaced with best model during training with early stopping
-            self.model = RandomForestRegressor(
+            return RandomForestRegressor(
                 n_estimators=100,
                 max_depth=None,
                 min_samples_split=2,
@@ -176,917 +170,719 @@ class PayoffPredictor:
                 random_state=42,
                 n_jobs=-1
             )
-            self.optimizer = None
-            self.criterion = None
         else:
-            # Neural network models
-            if hidden_dims is None:
-                hidden_dims = [128, 64, 32] if model_type == "mlp" else []
-            self.model = PayoffModel(
+            # Neural network (mlp or linear)
+            return PayoffModel(
                 self.embedding_dim,
-                hidden_dims=hidden_dims,
-                dropout=dropout
-            ).to(device)
-            self.optimizer = None
-            self.criterion = nn.MSELoss()
+                hidden_dims=self.model_config.hidden_dims,
+                dropout=self.model_config.dropout
+            ).to(self.device)
 
-        self.ground_truth_payoffs = None
-        self.train_indices = None
-        self.val_indices = None
-
-    def compute_ground_truth_payoffs(self):
-        """Compute ground truth payoffs for all P1-P2 agent pairs."""
-
-        print(f"Computing ground truth payoffs for {len(self.p1_policies)} x {len(self.p2_policies)} agent pairs...")
-        payoffs = []
-        pair_indices = []  # Store (p1_idx, p2_idx) for each payoff
-
-        for p1_idx, p1_policy in enumerate(tqdm(self.p1_policies, desc="P1 policies")):
-            for p2_idx, p2_policy in enumerate(self.p2_policies):
-                payoff = get_expected_payoffs(self.game, p1_policy, p2_policy)
-                payoffs.append(payoff)
-                pair_indices.append((p1_idx, p2_idx))
-
-        self.ground_truth_payoffs = np.array(payoffs)
-        self.pair_indices = pair_indices
-        return self.ground_truth_payoffs
-
-    def train(
-        self,
-        num_epochs: int = 100,
-        batch_size: int = 32,
-        learning_rate: float = 1e-3,
-        validation_split: float = 0.2,
-        verbose: bool = True
-    ):
+    def _split_data(self, total_len: int, validation_split: float):
         """
-        Train the payoff predictor model.
+        Create train/val split with random permutation.
 
         Args:
-            num_epochs: Number of training epochs (for neural networks; ignored for random_forest)
-            batch_size: Batch size for training (neural networks only)
-            learning_rate: Learning rate for optimizer (neural networks only)
-            validation_split: Fraction of data to use for validation
-            verbose: Whether to print training progress
+            total_len: Total number of data points
+            validation_split: Fraction for validation (0, 1)
 
         Returns:
-            dict: Training history with train/val losses
+            Tuple of (train_indices, val_indices)
         """
-        # Compute ground truth if not already done
-        if self.ground_truth_payoffs is None:
-            self.compute_ground_truth_payoffs()
+        n_val = max(1, int(total_len * validation_split))
+        perm = np.random.permutation(total_len)
+        return perm[n_val:], perm[:n_val]
 
-        # Create concatenated embeddings for all pairs
-        print("Creating concatenated embeddings for pairs...")
-        embeddings = []
-        for p1_idx, p2_idx in self.pair_indices:
-            p1_emb = self.p1_embeddings[p1_idx]
-            p2_emb = self.p2_embeddings[p2_idx]
-            concat_emb = np.concatenate([p1_emb, p2_emb])
-            embeddings.append(concat_emb)
-        embeddings = np.array(embeddings)
+    def train(self, X: np.ndarray, y: np.ndarray, validation_split: float = 0.2):
+        """
+        Train model on provided data.
 
-        # Split P1 agents to avoid leakage
-        n_p1_policies = len(self.p1_policies)
-        n_val_p1_policies = max(1, int(n_p1_policies * validation_split))  # Ensure at least 1 val agent
-        if n_val_p1_policies >= n_p1_policies:
-            raise ValueError(f"Not enough P1 agents ({n_p1_policies}) to create train/val split. Need at least 2.")
-        p1_policy_indices = np.random.permutation(n_p1_policies)
-        val_p1_policy_set = set(p1_policy_indices[:n_val_p1_policies])
-        train_p1_policy_set = set(p1_policy_indices[n_val_p1_policies:])
+        Args:
+            X: Input embeddings (N, embedding_dim)
+            y: Ground truth labels (N,)
+            validation_split: Fraction for validation
 
-        # Check if we should split P2 agents or use all P2 agents in both sets
-        n_p2_policies = len(self.p2_policies)
-        if n_p2_policies == 1:
-            # Single fixed opponent: use in both train and val
-            print("Single P2 agent detected - using same opponent for train and val")
-            train_indices = np.array([i for i, (p1_idx, p2_idx) in enumerate(self.pair_indices)
-                                      if p1_idx in train_p1_policy_set], dtype=int)
-            val_indices = np.array([i for i, (p1_idx, p2_idx) in enumerate(self.pair_indices)
-                                    if p1_idx in val_p1_policy_set], dtype=int)
-            print(f"Split summary: {len(train_indices)} training pairs, {len(val_indices)} validation pairs")
-            print(f"Training P1 agents: {len(train_p1_policy_set)}, Validation P1 agents: {len(val_p1_policy_set)}")
-        else:
-            # Multiple P2 agents: split them too
-            n_val_p2_policies = max(1, int(n_p2_policies * validation_split))
-            if n_val_p2_policies >= n_p2_policies:
-                raise ValueError(f"Not enough P2 agents ({n_p2_policies}) to create train/val split. Need at least 2.")
-            p2_policy_indices = np.random.permutation(n_p2_policies)
-            val_p2_policy_set = set(p2_policy_indices[:n_val_p2_policies])
-            train_p2_policy_set = set(p2_policy_indices[n_val_p2_policies:])
-
-            # A pair is in validation only if BOTH P1 and P2 are in validation sets
-            # A pair is in training only if BOTH P1 and P2 are in training sets
-            train_indices = np.array([i for i, (p1_idx, p2_idx) in enumerate(self.pair_indices)
-                                      if p1_idx in train_p1_policy_set and p2_idx in train_p2_policy_set], dtype=int)
-            val_indices = np.array([i for i, (p1_idx, p2_idx) in enumerate(self.pair_indices)
-                                    if p1_idx in val_p1_policy_set and p2_idx in val_p2_policy_set], dtype=int)
-
-            print(f"Split summary: {len(train_indices)} training pairs, {len(val_indices)} validation pairs")
-            print(f"Training P1 agents: {len(train_p1_policy_set)}, Validation P1 agents: {len(val_p1_policy_set)}")
-            print(f"Training P2 agents: {len(train_p2_policy_set)}, Validation P2 agents: {len(val_p2_policy_set)}")
-
-        # Store indices for later evaluation
+        Returns:
+            dict: Training history with 'train_loss' and 'val_loss' keys
+        """
+        # Create train/val split
+        train_indices, val_indices = self._split_data(len(X), validation_split)
         self.train_indices = train_indices
         self.val_indices = val_indices
 
-        # Training history
-        history = {
-            'train_loss': [],
-            'val_loss': []
-        }
-
-        if self.model_type == "random_forest":
-            # Random Forest training with early stopping
-            X_train = embeddings[train_indices]
-            # ground_truth_payoffs is already 1D (scalars from get_expected_payoffs)
-            y_train = self.ground_truth_payoffs[train_indices]
-            X_val = embeddings[val_indices]
-            y_val = self.ground_truth_payoffs[val_indices]
-
-            # Early stopping parameters
-            best_val_mse = float('inf')
-            patience_counter = 0
-            patience = 5  # Early stopping patience for RF (fewer than NN since RF trains faster)
-
-            # Try progressively more trees, implementing early stopping
-            for n_trees in [10, 25, 50, 100, 150, 200, 300]:
-                rf_model = RandomForestRegressor(
-                    n_estimators=n_trees,
-                    max_depth=None,
-                    min_samples_split=2,
-                    min_samples_leaf=1,
-                    random_state=42,
-                    n_jobs=-1,
-                    warm_start=False
-                )
-                rf_model.fit(X_train, y_train)
-
-                # Evaluate on train and val
-                train_pred = rf_model.predict(X_train)
-                val_pred = rf_model.predict(X_val)
-                train_mse = mean_squared_error(y_train, train_pred)
-                val_mse = mean_squared_error(y_val, val_pred)
-
-                history['train_loss'].append(train_mse)
-                history['val_loss'].append(val_mse)
-
-                if verbose:
-                    print(f"n_estimators={n_trees}: Train MSE={train_mse:.6f}, Val MSE={val_mse:.6f}")
-
-                # Early stopping check
-                if val_mse < best_val_mse:
-                    best_val_mse = val_mse
-                    best_rf_model = rf_model
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-                    if patience_counter >= patience:
-                        print(f"Early stopping at n_estimators={n_trees} - validation MSE plateaued")
-                        break
-
-            self.model = best_rf_model
-
+        # Dispatch to appropriate training method
+        if self.model_config.model_type == "random_forest":
+            return self._train_random_forest(X, y, train_indices, val_indices)
         else:
-            # Neural network training (mlp or linear)
-            X_train = torch.FloatTensor(embeddings[train_indices]).to(self.device)
-            y_train = torch.FloatTensor(self.ground_truth_payoffs[train_indices]).to(self.device)
-            X_val = torch.FloatTensor(embeddings[val_indices]).to(self.device)
-            y_val = torch.FloatTensor(self.ground_truth_payoffs[val_indices]).to(self.device)
+            return self._train_neural_network(X, y, train_indices, val_indices)
 
-            # Initialize optimizer
-            self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
+    def _train_random_forest(self, X, y, train_indices, val_indices):
+        """
+        Train random forest with progressive n_estimators and early stopping.
+
+        Args:
+            X: Input embeddings
+            y: Ground truth labels
+            train_indices: Indices for training
+            val_indices: Indices for validation
+
+        Returns:
+            dict: Training history
+        """
+        X_train, y_train = X[train_indices], y[train_indices]
+        X_val, y_val = X[val_indices], y[val_indices]
+
+        history = {'train_loss': [], 'val_loss': []}
+        best_val_mse = float('inf')
+        best_rf_model = None
+        patience_counter = 0
+        patience = 5
+
+        for n_trees in [10, 25, 50, 100, 150, 200, 300]:
+            rf_model = RandomForestRegressor(
+                n_estimators=n_trees,
+                max_depth=None,
+                min_samples_split=2,
+                min_samples_leaf=1,
+                random_state=42,
+                n_jobs=-1
+            )
+            rf_model.fit(X_train, y_train)
+
+            train_pred = rf_model.predict(X_train)
+            val_pred = rf_model.predict(X_val)
+            train_mse = mean_squared_error(y_train, train_pred)
+            val_mse = mean_squared_error(y_val, val_pred)
+
+            history['train_loss'].append(train_mse)
+            history['val_loss'].append(val_mse)
+
+            print(f"n_estimators={n_trees}: Train MSE={train_mse:.6f}, Val MSE={val_mse:.6f}")
+
+            if val_mse < best_val_mse:
+                best_val_mse = val_mse
+                best_rf_model = rf_model
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"Early stopping at n_estimators={n_trees}")
+                    break
+
+        self.model = best_rf_model
+        return history
+
+    def _train_neural_network(self, X, y, train_indices, val_indices):
+        """
+        Single implementation of neural network training with early stopping.
+
+        Uses Adam optimizer, MSE loss, mini-batch SGD.
+
+        Args:
+            X: Input embeddings
+            y: Ground truth labels
+            train_indices: Indices for training
+            val_indices: Indices for validation
+
+        Returns:
+            dict: Training history
+        """
+        cfg = self.model_config
+        X_train = torch.FloatTensor(X[train_indices]).to(self.device)
+        y_train = torch.FloatTensor(y[train_indices]).to(self.device)
+        X_val = torch.FloatTensor(X[val_indices]).to(self.device)
+        y_val = torch.FloatTensor(y[val_indices]).to(self.device)
+
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=cfg.learning_rate)
+        criterion = nn.MSELoss()
+
+        history = {'train_loss': [], 'val_loss': []}
+        best_val_loss = float('inf')
+        patience_counter = 0
+
+        for epoch in range(cfg.num_epochs):
+            self.model.train()
+
+            # Shuffle and mini-batch
+            perm = torch.randperm(len(X_train))
+            X_train_shuffled = X_train[perm]
+            y_train_shuffled = y_train[perm]
+
+            train_losses = []
+            for i in range(0, len(X_train), cfg.batch_size):
+                batch_X = X_train_shuffled[i:i+cfg.batch_size]
+                batch_y = y_train_shuffled[i:i+cfg.batch_size]
+
+                optimizer.zero_grad()
+                predictions = self.model(batch_X)
+                loss = criterion(predictions, batch_y)
+                loss.backward()
+                optimizer.step()
+
+                train_losses.append(loss.item())
+
+            # Validation
+            self.model.eval()
+            with torch.no_grad():
+                val_predictions = self.model(X_val)
+                val_loss = criterion(val_predictions, y_val)
+
+            epoch_train_loss = np.mean(train_losses)
+            epoch_val_loss = val_loss.item()
+            history['train_loss'].append(epoch_train_loss)
+            history['val_loss'].append(epoch_val_loss)
 
             # Early stopping
-            best_val_loss = float('inf')
-            patience_counter = 0
-            patience = 50
+            if epoch_val_loss < best_val_loss:
+                best_val_loss = epoch_val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= cfg.early_stopping_patience:
+                    print(f"Early stopping at epoch {epoch+1}")
+                    break
 
-            # Training loop
-            for epoch in range(num_epochs):
-                self.model.train()
-
-                # Shuffle training data
-                perm = torch.randperm(len(X_train))
-                X_train_shuffled = X_train[perm]
-                y_train_shuffled = y_train[perm]
-
-                train_losses = []
-
-                # Mini-batch training
-                for i in range(0, len(X_train), batch_size):
-                    batch_X = X_train_shuffled[i:i+batch_size]
-                    batch_y = y_train_shuffled[i:i+batch_size]
-
-                    self.optimizer.zero_grad()
-                    predictions = self.model(batch_X)
-                    loss = self.criterion(predictions, batch_y)
-
-                    loss.backward()
-                    self.optimizer.step()
-
-                    train_losses.append(loss.item())
-
-                # Validation
-                self.model.eval()
-                with torch.no_grad():
-                    val_predictions = self.model(X_val)
-                    val_loss = self.criterion(val_predictions, y_val)
-
-                # Record history
-                epoch_train_loss = np.mean(train_losses)
-                epoch_val_loss = val_loss.item()
-                history['train_loss'].append(epoch_train_loss)
-                history['val_loss'].append(epoch_val_loss)
-
-                # Early stopping check
-                if epoch_val_loss < best_val_loss:
-                    best_val_loss = epoch_val_loss
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-                    if patience_counter >= patience:
-                        # if verbose:
-                        print(f"Early stopping at epoch {epoch+1} - validation loss plateaued")
-                        break
-
-                if verbose and (epoch + 1) % 10 == 0:
-                    print(f"Epoch {epoch+1}/{num_epochs} - "
-                          f"Train Loss: {epoch_train_loss:.6f}, "
-                          f"Val Loss: {epoch_val_loss:.6f}")
+            if (epoch + 1) % 10 == 0:
+                print(f"Epoch {epoch+1}/{cfg.num_epochs} - "
+                      f"Train: {epoch_train_loss:.6f}, Val: {epoch_val_loss:.6f}")
 
         return history
 
-    def predict(self, p1_embedding: np.ndarray, p2_embedding: np.ndarray):
+    def evaluate(self, X: np.ndarray, y: np.ndarray, indices: np.ndarray,
+                 train_y: np.ndarray) -> dict:
         """
-        Predict the expected payoff for a P1-P2 agent pair.
+        Evaluate model on specified indices.
+
+        Uses training set mean for baseline computation to prevent information leakage.
 
         Args:
-            p1_embedding: P1 agent embedding
-            p2_embedding: P2 agent embedding
+            X: All input features
+            y: All ground truth labels
+            indices: Which indices to evaluate
+            train_y: Ground truth for training set (for baseline)
 
         Returns:
-            float: Predicted expected payoff
+            dict with mse, mae, baseline_mse, predictions, ground_truth
         """
-        if isinstance(p1_embedding, torch.Tensor):
-            p1_embedding = p1_embedding.detach().cpu().numpy()
-        if isinstance(p2_embedding, torch.Tensor):
-            p2_embedding = p2_embedding.detach().cpu().numpy()
-
-        # Concatenate embeddings
-        concat_embedding = np.concatenate([p1_embedding, p2_embedding])
-
-        if self.model_type == "random_forest":
-            # Random Forest prediction
-            prediction = self.model.predict(concat_embedding.reshape(1, -1))
-            return prediction[0]
-        else:
-            # Neural network prediction
-            self.model.eval()
-            with torch.no_grad():
-                embedding_tensor = torch.FloatTensor(concat_embedding).unsqueeze(0).to(self.device)
-                prediction = self.model(embedding_tensor)
-                return prediction.item()
-
-    def evaluate(self, eval_set: str = "all"):
-        """
-        Evaluate the model on agent pairs.
-
-        Args:
-            eval_set: Which set to evaluate on: "all", "train", or "val".
-
-        Returns:
-            dict: Evaluation metrics (MSE, MAE, R2)
-        """
-        # Determine which pairs to evaluate
-        if eval_set == "train" and self.train_indices is not None:
-            indices = self.train_indices
-            test_payoffs = self.ground_truth_payoffs[indices]
-            test_pairs = [self.pair_indices[i] for i in indices]
-            print(f"Evaluating on training set ({len(indices)} pairs)...")
-        elif eval_set == "val" and self.val_indices is not None:
-            indices = self.val_indices
-            test_payoffs = self.ground_truth_payoffs[indices]
-            test_pairs = [self.pair_indices[i] for i in indices]
-            print(f"Evaluating on validation set ({len(indices)} pairs)...")
-        elif eval_set == "all":
-            test_payoffs = self.ground_truth_payoffs
-            test_pairs = self.pair_indices
-            print(f"Evaluating on all pairs ({len(test_pairs)} pairs)...")
-        else:
-            raise ValueError(f"Invalid eval_set: {eval_set}. Must be 'all', 'train', or 'val'. "
-                           f"Also ensure train() has been called to create the split.")
-
-        # Get predictions for all pairs
-        print("Computing predictions...")
-        predictions = []
-        for p1_idx, p2_idx in tqdm(test_pairs):
-            p1_embedding = self.p1_embeddings[p1_idx]
-            p2_embedding = self.p2_embeddings[p2_idx]
-            pred = self.predict(p1_embedding, p2_embedding)
-            predictions.append(pred)
-        predictions = np.array(predictions)
+        predictions = self.predict(X[indices])
+        ground_truth = y[indices]
 
         # Compute metrics
-        mse = np.mean((predictions - test_payoffs) ** 2)
-        mae = np.mean(np.abs(predictions - test_payoffs))
+        mse = np.mean((predictions - ground_truth) ** 2)
+        mae = np.mean(np.abs(predictions - ground_truth))
 
-        # R2 score
-        ss_res = np.sum((test_payoffs - predictions) ** 2)
-        ss_tot = np.sum((test_payoffs - np.mean(test_payoffs)) ** 2)
-        r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+        # Baseline uses training set mean
+        train_mean = np.mean(train_y)
+        baseline_mse = np.mean((ground_truth - train_mean) ** 2)
 
-        metrics = {
+        return {
             'mse': mse,
             'mae': mae,
-            'r2': r2,
+            'baseline_mse': baseline_mse,
             'predictions': predictions,
-            'ground_truth': test_payoffs
+            'ground_truth': ground_truth
         }
 
-        return metrics
-
-    def save(self, path: str):
-        """Save the trained model."""
-        if self.model_type == "random_forest":
-            import pickle
-            with open(path, 'wb') as f:
-                pickle.dump({
-                    'model': self.model,
-                    'model_type': self.model_type,
-                    'embedding_dim': self.embedding_dim
-                }, f)
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Generate predictions for given inputs."""
+        if self.model_config.model_type == "random_forest":
+            return self.model.predict(X)
         else:
-            torch.save({
-                'model_state_dict': self.model.state_dict(),
-                'model_type': self.model_type,
-                'embedding_dim': self.embedding_dim,
-                'optimizer_state_dict': self.optimizer.state_dict() if self.optimizer else None,
-            }, path)
-        print(f"Model saved to {path}")
-
-    def load(self, path: str):
-        """Load a trained model."""
-        if self.model_type == "random_forest":
-            import pickle
-            with open(path, 'rb') as f:
-                checkpoint = pickle.load(f)
-                self.model = checkpoint['model']
-        else:
-            checkpoint = torch.load(path, map_location=self.device)
-            self.model.load_state_dict(checkpoint['model_state_dict'])
-            if checkpoint['optimizer_state_dict'] and self.optimizer:
-                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        print(f"Model loaded from {path}")
+            self.model.eval()
+            with torch.no_grad():
+                X_tensor = torch.FloatTensor(X).to(self.device)
+                return self.model(X_tensor).cpu().numpy()
 
 
-class StatePayoffPredictor(PayoffPredictor):
+class PayoffPredictorRefactored:
     """
-    Payoff predictor that conditions on game states.
+    Predicts expected payoff between P1 and P2 policies.
 
-    Predicts payoffs for (P1_agent, P2_agent, state) triples instead of just agent pairs.
+    Handles both single fixed opponent (Task A) and agent vs agent (Task B) cases.
     """
 
     def __init__(
         self,
         game,
-        p1_agents: List[Any],
-        p2_agents: List[Any],
-        p1_encoder_fn: Callable,
-        p2_encoder_fn: Callable,
-        state_sampler: Callable,
-        num_states_per_pair: int,
-        hidden_dims: List[int],
-        dropout: float,
+        p1_policies: List[Policy],
+        p2_policies: List[Policy],
+        p1_embeddings: np.ndarray,
+        p2_embeddings: np.ndarray,
+        model_config: ModelConfig,
         device: str = "cpu"
     ):
         """
-        Initialize the StatePayoffPredictor.
+        Initialize PayoffPredictor.
 
         Args:
             game: OpenSpiel game instance
-            p1_agents: List of P1 agents
-            p2_agents: List of P2 agents
-            p1_encoder_fn: Function that maps a P1 agent to an embedding vector
-            p2_encoder_fn: Function that maps a P2 agent to an embedding vector
-            state_sampler: Function that generates states from the game (takes game as input, returns list of states)
-            num_states_per_pair: Number of states to sample per agent pair
-            hidden_dims: Hidden layer dimensions for the predictor network
-            dropout: Dropout rate for the predictor network
-            device: cpu or cuda
+            p1_policies: List of P1 policies
+            p2_policies: List of P2 policies (can be single-element list for fixed opponent)
+            p1_embeddings: P1 agent embeddings
+            p2_embeddings: P2 agent embeddings
+            model_config: Model configuration
+            device: Device for computation
         """
-        self.state_sampler = state_sampler
-        self.num_states_per_pair = num_states_per_pair
-        self.states = None
-        self.state_tensors = None
-        self.p1_agents = p1_agents
-        self.p2_agents = p2_agents
-        self.p1_encoder_fn = p1_encoder_fn
-        self.p2_encoder_fn = p2_encoder_fn
+        # Domain setup
+        self.game = game
+        self.p1_policies = p1_policies
+        self.p2_policies = p2_policies
+        self.p1_embeddings = np.array(p1_embeddings)
+        self.p2_embeddings = np.array(p2_embeddings)
 
-        # Encode agents to get embeddings
-        print("Encoding P1 agents...")
-        p1_embeddings = [p1_encoder_fn(agent).cpu().numpy() for agent in tqdm(p1_agents)]
-        p1_embeddings = np.array(p1_embeddings)
+        # Create trainer via composition
+        embedding_dim = self.p1_embeddings.shape[1] + self.p2_embeddings.shape[1]
+        self.trainer = ModelTrainer(embedding_dim, model_config, device)
 
-        print("Encoding P2 agents...")
-        p2_embeddings = [p2_encoder_fn(agent).cpu().numpy() for agent in tqdm(p2_agents)]
-        p2_embeddings = np.array(p2_embeddings)
+        # Domain state
+        self.ground_truth_payoffs = None
+        self.pair_indices = None  # Will be set in compute_ground_truth_payoffs
 
-        # Convert agents to policies
-        from utils import PPOAgentPolicy
-        p1_policies = [PPOAgentPolicy(game, agent, 0, use_observation=False) for agent in p1_agents]
-        p2_policies = [PPOAgentPolicy(game, agent, 1, use_observation=False) for agent in p2_agents]
+    def compute_ground_truth_payoffs(self):
+        """Compute ground truth payoffs for all P1-P2 agent pairs."""
+        print(f"Computing ground truth payoffs for {len(self.p1_policies)} x {len(self.p2_policies)} agent pairs...")
+        payoffs = []
+        self.pair_indices = []
 
-        # Call parent init with embeddings and policies
-        super().__init__(
-            game=game,
-            p1_policies=p1_policies,
-            p2_policies=p2_policies,
-            p1_embeddings=p1_embeddings,
-            p2_embeddings=p2_embeddings,
-            hidden_dims=hidden_dims,
-            dropout=dropout,
-            device=device
-        )
+        for p1_idx, p1_policy in enumerate(tqdm(self.p1_policies, desc="P1 policies")):
+            for p2_idx, p2_policy in enumerate(self.p2_policies):
+                payoff = get_expected_payoffs(self.game, p1_policy, p2_policy)
+                payoffs.append(payoff)
+                self.pair_indices.append((p1_idx, p2_idx))
 
-        # Sample and encode states
-        print(f"Sampling {num_states_per_pair} states...")
-        self.states = state_sampler(game, num_states_per_pair)
+        self.ground_truth_payoffs = np.array(payoffs)
+        return self.ground_truth_payoffs
 
+    def train_with_agent_level_split(self, validation_split: float = 0.2):
+        """
+        Train with agent-level splitting to avoid leakage.
+
+        This method overrides the base train() to implement custom agent-level
+        splitting instead of random pair-level splitting.
+
+        Args:
+            validation_split: Fraction of agents for validation
+
+        Returns:
+            dict: Training history
+        """
+        # Compute ground truth if needed
+        if self.ground_truth_payoffs is None:
+            self.compute_ground_truth_payoffs()
+
+        # Create concatenated embeddings for all pairs
+        print("Creating concatenated embeddings for pairs...")
+        X = np.array([
+            np.concatenate([self.p1_embeddings[p1_idx], self.p2_embeddings[p2_idx]])
+            for p1_idx, p2_idx in self.pair_indices
+        ])
+        y = self.ground_truth_payoffs
+
+        # Agent-level split (prevents leakage)
+        n_p1 = len(self.p1_policies)
+        n_val_p1 = max(1, int(n_p1 * validation_split))
+        if n_val_p1 >= n_p1:
+            raise ValueError(f"Not enough P1 agents ({n_p1}) for train/val split. Need at least 2.")
+
+        p1_perm = np.random.permutation(n_p1)
+        val_p1_set = set(p1_perm[:n_val_p1])
+        train_p1_set = set(p1_perm[n_val_p1:])
+
+        # Handle single P2 (fixed opponent) vs multiple P2
+        if len(self.p2_policies) == 1:
+            # Single opponent: split only on P1
+            print("Single P2 agent detected - using same opponent for train and val")
+            train_indices = np.array([
+                i for i, (p1_idx, _) in enumerate(self.pair_indices)
+                if p1_idx in train_p1_set
+            ])
+            val_indices = np.array([
+                i for i, (p1_idx, _) in enumerate(self.pair_indices)
+                if p1_idx in val_p1_set
+            ])
+        else:
+            # Multiple opponents: split on both
+            n_p2 = len(self.p2_policies)
+            n_val_p2 = max(1, int(n_p2 * validation_split))
+            if n_val_p2 >= n_p2:
+                raise ValueError(f"Not enough P2 agents ({n_p2}) for train/val split. Need at least 2.")
+
+            p2_perm = np.random.permutation(n_p2)
+            val_p2_set = set(p2_perm[:n_val_p2])
+            train_p2_set = set(p2_perm[n_val_p2:])
+
+            train_indices = np.array([
+                i for i, (p1_idx, p2_idx) in enumerate(self.pair_indices)
+                if p1_idx in train_p1_set and p2_idx in train_p2_set
+            ])
+            val_indices = np.array([
+                i for i, (p1_idx, p2_idx) in enumerate(self.pair_indices)
+                if p1_idx in val_p1_set and p2_idx in val_p2_set
+            ])
+
+        print(f"Split summary: {len(train_indices)} training pairs, {len(val_indices)} validation pairs")
+
+        # Set indices on trainer
+        self.trainer.train_indices = train_indices
+        self.trainer.val_indices = val_indices
+
+        # Delegate training to ModelTrainer
+        if self.trainer.model_config.model_type == "random_forest":
+            return self.trainer._train_random_forest(X, y, train_indices, val_indices)
+        else:
+            return self.trainer._train_neural_network(X, y, train_indices, val_indices)
+
+    def evaluate(self, eval_set: str = "val"):
+        """Prepare data and delegate evaluation to ModelTrainer."""
+        X = self._prepare_training_data()
+        y = self.ground_truth_payoffs
+
+        if eval_set == "train":
+            indices = self.trainer.train_indices
+        elif eval_set == "val":
+            indices = self.trainer.val_indices
+        elif eval_set == "all":
+            indices = np.arange(len(y))
+        else:
+            raise ValueError(f"Invalid eval_set: {eval_set}. Must be 'train', 'val', or 'all'")
+
+        train_y = y[self.trainer.train_indices]
+        return self.trainer.evaluate(X, y, indices, train_y)
+
+    def _prepare_training_data(self):
+        """Convert pair_indices to concatenated embeddings."""
+        return np.array([
+            np.concatenate([self.p1_embeddings[p1_idx], self.p2_embeddings[p2_idx]])
+            for p1_idx, p2_idx in self.pair_indices
+        ])
+
+
+class StatePayoffPredictorRefactored:
+    """
+    Predicts expected payoff for (P1, P2, state) triples.
+
+    Evaluates policies from specific game states rather than initial state.
+    """
+
+    def __init__(
+        self,
+        game,
+        p1_policies: List[Policy],
+        p2_policies: List[Policy],
+        p1_embeddings: np.ndarray,
+        p2_embeddings: np.ndarray,
+        model_config: ModelConfig,
+        num_states: int,
+        max_depth: int,
+        device: str = "cpu"
+    ):
+        """
+        Initialize StatePayoffPredictor.
+
+        Args:
+            game: OpenSpiel game instance
+            p1_policies: List of P1 policies
+            p2_policies: List of P2 policies
+            p1_embeddings: P1 embeddings
+            p2_embeddings: P2 embeddings
+            model_config: Model configuration
+            num_states: Number of states to sample
+            max_depth: Maximum depth for state sampling
+            device: Device for computation
+        """
+        # Domain setup
+        self.game = game
+        self.p1_policies = p1_policies
+        self.p2_policies = p2_policies
+        self.p1_embeddings = np.array(p1_embeddings)
+        self.p2_embeddings = np.array(p2_embeddings)
+
+        # Sample states
+        print(f"Sampling {num_states} game states (max depth {max_depth})...")
+        self.states = sample_random_states(game, num_states, max_depth)
+
+        # Encode states
         print("Encoding states...")
-        self.state_tensors = []
-        for state in tqdm(self.states):
-            # Use state tensor as embedding
-            state_tensor = torch.FloatTensor(get_state_tensor(state))
-            self.state_tensors.append(state_tensor.numpy())
-        self.state_tensors = np.array(self.state_tensors)
+        self.state_tensors = np.array([
+            get_state_tensor(state) for state in tqdm(self.states, desc="States")
+        ])
 
-        # Update embedding dimension to include state
-        state_dim = self.state_tensors.shape[1]
-        self.embedding_dim = self.p1_embeddings.shape[1] + self.p2_embeddings.shape[1] + state_dim
+        # Create trainer via composition
+        embedding_dim = (self.p1_embeddings.shape[1] +
+                        self.p2_embeddings.shape[1] +
+                        self.state_tensors.shape[1])
+        self.trainer = ModelTrainer(embedding_dim, model_config, device)
 
-        # Reinitialize model with correct embedding dimension
-        self.model = PayoffModel(
-            self.embedding_dim,
-            hidden_dims=hidden_dims,
-            dropout=dropout
-        ).to(device)
+        # Domain state
+        self.ground_truth_payoffs = None
+        self.triple_indices = None  # Will be set in compute_ground_truth_payoffs
 
     def compute_ground_truth_payoffs(self):
         """Compute ground truth payoffs for all (P1, P2, state) triples."""
-
-        print(f"Computing ground truth payoffs for {len(self.p1_agents)} x {len(self.p2_agents)} x {len(self.states)} triples...")
+        print(f"Computing ground truth payoffs for {len(self.p1_policies)} x {len(self.p2_policies)} x {len(self.states)} triples...")
         payoffs = []
-        triple_indices = []  # Store (p1_idx, p2_idx, state_idx) for each payoff
+        self.triple_indices = []
 
-        for p1_idx, p1_agent in enumerate(tqdm(self.p1_agents, desc="P1 agents")):
-            for p2_idx, p2_agent in enumerate(self.p2_agents):
+        for p1_idx, p1_policy in enumerate(tqdm(self.p1_policies, desc="P1 policies")):
+            for p2_idx, p2_policy in enumerate(self.p2_policies):
                 for state_idx, state in enumerate(self.states):
                     # Compute payoff starting from this state
-                    payoff = self._compute_payoff_from_state(state, p1_agent, p2_agent)
+                    payoff = self._compute_payoff_from_state(state, p1_policy, p2_policy)
                     payoffs.append(payoff)
-                    triple_indices.append((p1_idx, p2_idx, state_idx))
+                    self.triple_indices.append((p1_idx, p2_idx, state_idx))
 
         self.ground_truth_payoffs = np.array(payoffs)
-        self.triple_indices = triple_indices
         return self.ground_truth_payoffs
 
-    def _compute_payoff_from_state(self, state, p1_agent, p2_agent):
+    def _compute_payoff_from_state(self, state, p1_policy: Policy, p2_policy: Policy):
         """Compute expected payoff starting from a given state."""
-
-        # Wrap agents in policies
-        p0_policy = PPOAgentPolicy(self.game, p1_agent, 0, False)
-
-        if hasattr(p2_agent, 'actor'):
-            # PPOAgent
-            p1_policy = PPOAgentPolicy(self.game, p2_agent, 1, False)
-        else:
-            # Already a policy
-            p1_policy = p2_agent
-
-        policies = [p0_policy, p1_policy]
+        policies = [p1_policy, p2_policy]
 
         # Sample episodes starting from this state
         payoffs = []
+        from open_spiel.python.algorithms.psro_v2.abstract_meta_trainer import sample_episode
         for _ in range(100):  # 100 episodes per state
             payoff = sample_episode(state.clone(), policies)[0]
             payoffs.append(payoff)
 
         return np.mean(payoffs)
 
-    def train(
-        self,
-        num_epochs: int = 100,
-        batch_size: int = 32,
-        learning_rate: float = 1e-3,
-        validation_split: float = 0.2,
-        verbose: bool = True,
-    ):
+    def train_with_agent_level_split(self, validation_split: float = 0.2):
         """
-        Train the payoff predictor model.
+        Train with agent-level splitting to avoid leakage.
 
         Args:
-            num_epochs: Number of training epochs
-            batch_size: Batch size for training
-            learning_rate: Learning rate for optimizer
-            validation_split: Fraction of data to use for validation
-            verbose: Whether to print training progress
-            seed: Random seed for reproducibility
+            validation_split: Fraction of agents for validation
 
         Returns:
-            dict: Training history with train/val losses
+            dict: Training history
         """
-        # Compute ground truth if not already done
+        # Compute ground truth if needed
         if self.ground_truth_payoffs is None:
             self.compute_ground_truth_payoffs()
 
         # Create concatenated embeddings for all triples
         print("Creating concatenated embeddings for triples...")
-        embeddings = []
-        for p1_idx, p2_idx, state_idx in self.triple_indices:
-            p1_emb = self.p1_embeddings[p1_idx]
-            p2_emb = self.p2_embeddings[p2_idx]
-            state_emb = self.state_tensors[state_idx]
-            concat_emb = np.concatenate([p1_emb, p2_emb, state_emb])
-            embeddings.append(concat_emb)
-        embeddings = np.array(embeddings)
+        X = np.array([
+            np.concatenate([
+                self.p1_embeddings[p1_idx],
+                self.p2_embeddings[p2_idx],
+                self.state_tensors[state_idx]
+            ])
+            for p1_idx, p2_idx, state_idx in self.triple_indices
+        ])
+        y = self.ground_truth_payoffs
 
-        # Split at P1 agent, P2 agent, AND state level to avoid leakage
-        n_p1_agents = len(self.p1_agents)
-        n_val_p1_agents = int(n_p1_agents * validation_split)
-        p1_agent_indices = np.random.permutation(n_p1_agents)
-        val_p1_agent_set = set(p1_agent_indices[:n_val_p1_agents])
-        train_p1_agent_set = set(p1_agent_indices[n_val_p1_agents:])
+        # Agent-level split on P1 policies
+        n_p1 = len(self.p1_policies)
+        n_val_p1 = max(1, int(n_p1 * validation_split))
+        if n_val_p1 >= n_p1:
+            raise ValueError(f"Not enough P1 policies ({n_p1}) for train/val split. Need at least 2.")
 
-        n_p2_agents = len(self.p2_agents)
-        n_val_p2_agents = int(n_p2_agents * validation_split)
-        p2_agent_indices = np.random.permutation(n_p2_agents)
-        val_p2_agent_set = set(p2_agent_indices[:n_val_p2_agents])
-        train_p2_agent_set = set(p2_agent_indices[n_val_p2_agents:])
+        p1_perm = np.random.permutation(n_p1)
+        val_p1_set = set(p1_perm[:n_val_p1])
+        train_p1_set = set(p1_perm[n_val_p1:])
 
-        n_states = len(self.states)
-        n_val_states = int(n_states * validation_split)
-        state_indices = np.random.permutation(n_states)
-        val_state_set = set(state_indices[:n_val_states])
-        train_state_set = set(state_indices[n_val_states:])
+        # Split on P2 policies as well
+        n_p2 = len(self.p2_policies)
+        n_val_p2 = max(1, int(n_p2 * validation_split))
+        if n_val_p2 >= n_p2:
+            raise ValueError(f"Not enough P2 policies ({n_p2}) for train/val split. Need at least 2.")
 
-        # A triple is in validation only if ALL of P1, P2, and state are in validation sets
-        # A triple is in training only if ALL of P1, P2, and state are in training sets
-        train_indices = np.array([i for i, (p1_idx, p2_idx, state_idx) in enumerate(self.triple_indices)
-                                  if p1_idx in train_p1_agent_set and p2_idx in train_p2_agent_set and state_idx in train_state_set], dtype=int)
-        val_indices = np.array([i for i, (p1_idx, p2_idx, state_idx) in enumerate(self.triple_indices)
-                                if p1_idx in val_p1_agent_set and p2_idx in val_p2_agent_set and state_idx in val_state_set], dtype=int)
+        p2_perm = np.random.permutation(n_p2)
+        val_p2_set = set(p2_perm[:n_val_p2])
+        train_p2_set = set(p2_perm[n_val_p2:])
+
+        # States are reused in both train and val
+        train_indices = np.array([
+            i for i, (p1_idx, p2_idx, _) in enumerate(self.triple_indices)
+            if p1_idx in train_p1_set and p2_idx in train_p2_set
+        ])
+        val_indices = np.array([
+            i for i, (p1_idx, p2_idx, _) in enumerate(self.triple_indices)
+            if p1_idx in val_p1_set and p2_idx in val_p2_set
+        ])
 
         print(f"Split summary: {len(train_indices)} training triples, {len(val_indices)} validation triples")
-        print(f"Training P1 agents: {len(train_p1_agent_set)}, Validation P1 agents: {len(val_p1_agent_set)}")
-        print(f"Training P2 agents: {len(train_p2_agent_set)}, Validation P2 agents: {len(val_p2_agent_set)}")
-        print(f"Training states: {len(train_state_set)}, Validation states: {len(val_state_set)}")
 
-        # Store indices for later evaluation
-        self.train_indices = train_indices
-        self.val_indices = val_indices
+        # Set indices on trainer
+        self.trainer.train_indices = train_indices
+        self.trainer.val_indices = val_indices
 
-        X_train = torch.FloatTensor(embeddings[train_indices]).to(self.device)
-        y_train = torch.FloatTensor(self.ground_truth_payoffs[train_indices]).to(self.device)
-        X_val = torch.FloatTensor(embeddings[val_indices]).to(self.device)
-        y_val = torch.FloatTensor(self.ground_truth_payoffs[val_indices]).to(self.device)
-
-        # Initialize optimizer
-        self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
-
-        # Training history
-        history = {
-            'train_loss': [],
-            'val_loss': []
-        }
-
-        # Early stopping
-        best_val_loss = float('inf')
-        patience_counter = 0
-        patience = 50
-
-        # Training loop
-        for epoch in range(num_epochs):
-            self.model.train()
-
-            # Shuffle training data
-            perm = torch.randperm(len(X_train))
-            X_train_shuffled = X_train[perm]
-            y_train_shuffled = y_train[perm]
-
-            train_losses = []
-
-            # Mini-batch training
-            for i in range(0, len(X_train), batch_size):
-                batch_X = X_train_shuffled[i:i+batch_size]
-                batch_y = y_train_shuffled[i:i+batch_size]
-
-                self.optimizer.zero_grad()
-                predictions = self.model(batch_X)
-                loss = self.criterion(predictions, batch_y)
-
-                loss.backward()
-                self.optimizer.step()
-
-                train_losses.append(loss.item())
-
-            # Validation
-            self.model.eval()
-            with torch.no_grad():
-                val_predictions = self.model(X_val)
-                val_loss = self.criterion(val_predictions, y_val)
-
-            # Record history
-            epoch_train_loss = np.mean(train_losses)
-            epoch_val_loss = val_loss.item()
-            history['train_loss'].append(epoch_train_loss)
-            history['val_loss'].append(epoch_val_loss)
-
-            # Early stopping check
-            if epoch_val_loss < best_val_loss:
-                best_val_loss = epoch_val_loss
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    print(f"Early stopping at epoch {epoch+1} - validation loss plateaued")
-                    break
-
-            if verbose and (epoch + 1) % 10 == 0:
-                print(f"Epoch {epoch+1}/{num_epochs} - "
-                      f"Train Loss: {epoch_train_loss:.6f}, "
-                      f"Val Loss: {epoch_val_loss:.6f}")
-
-        return history
-
-    def predict(self, p1_agent, p2_agent, state):
-        """
-        Predict the expected payoff for a (P1, P2, state) triple.
-
-        Args:
-            p1_agent: A P1 agent object
-            p2_agent: A P2 agent object
-            state: A game state
-
-        Returns:
-            float: Predicted expected payoff
-        """
-        self.model.eval()
-        with torch.no_grad():
-            # Encode P1 agent
-            p1_embedding = self.p1_encoder_fn(p1_agent)
-            if isinstance(p1_embedding, torch.Tensor):
-                p1_embedding = p1_embedding.detach().cpu().numpy()
-
-            # Encode P2 agent
-            p2_embedding = self.p2_encoder_fn(p2_agent)
-            if isinstance(p2_embedding, torch.Tensor):
-                p2_embedding = p2_embedding.detach().cpu().numpy()
-
-            # Encode state (both players' perspectives)
-            state_tensor = torch.FloatTensor(get_state_tensor(state))
-            state_embedding = state_tensor.numpy()
-
-            # Concatenate embeddings
-            concat_embedding = np.concatenate([p1_embedding, p2_embedding, state_embedding])
-            embedding_tensor = torch.FloatTensor(concat_embedding).unsqueeze(0).to(self.device)
-            prediction = self.model(embedding_tensor)
-            return prediction.item()
-
-    def evaluate(self, eval_set: str = "all"):
-        """
-        Evaluate the model on (agent, agent, state) triples.
-
-        Args:
-            eval_set: Which set to evaluate on: "all", "train", or "val".
-
-        Returns:
-            dict: Evaluation metrics (MSE, MAE, R2)
-        """
-        # Determine which triples to evaluate
-        if eval_set == "train" and self.train_indices is not None:
-            indices = self.train_indices
-            test_payoffs = self.ground_truth_payoffs[indices]
-            test_triples = [self.triple_indices[i] for i in indices]
-            print(f"Evaluating on training set ({len(indices)} triples)...")
-        elif eval_set == "val" and self.val_indices is not None:
-            indices = self.val_indices
-            test_payoffs = self.ground_truth_payoffs[indices]
-            test_triples = [self.triple_indices[i] for i in indices]
-            print(f"Evaluating on validation set ({len(indices)} triples)...")
-        elif eval_set == "all":
-            test_payoffs = self.ground_truth_payoffs
-            test_triples = self.triple_indices
-            print(f"Evaluating on all triples ({len(test_triples)} triples)...")
+        # Delegate training to ModelTrainer
+        if self.trainer.model_config.model_type == "random_forest":
+            return self.trainer._train_random_forest(X, y, train_indices, val_indices)
         else:
-            raise ValueError(f"Invalid eval_set: {eval_set}. Must be 'all', 'train', or 'val'. "
-                           f"Also ensure train() has been called to create the split.")
+            return self.trainer._train_neural_network(X, y, train_indices, val_indices)
 
-        # Get predictions for all triples
-        print("Computing predictions...")
-        predictions = []
-        for p1_idx, p2_idx, state_idx in tqdm(test_triples):
-            p1_agent = self.p1_agents[p1_idx]
-            p2_agent = self.p2_agents[p2_idx]
-            state = self.states[state_idx]
-            pred = self.predict(p1_agent, p2_agent, state)
-            predictions.append(pred)
-        predictions = np.array(predictions)
+    def evaluate(self, eval_set: str = "val"):
+        """Prepare data and delegate evaluation to ModelTrainer."""
+        X = self._prepare_training_data()
+        y = self.ground_truth_payoffs
 
-        # Compute metrics
-        mse = np.mean((predictions - test_payoffs) ** 2)
-        mae = np.mean(np.abs(predictions - test_payoffs))
+        if eval_set == "train":
+            indices = self.trainer.train_indices
+        elif eval_set == "val":
+            indices = self.trainer.val_indices
+        elif eval_set == "all":
+            indices = np.arange(len(y))
+        else:
+            raise ValueError(f"Invalid eval_set: {eval_set}. Must be 'train', 'val', or 'all'")
 
-        metrics = {
-            'mse': mse,
-            'mae': mae,
-            'predictions': predictions,
-            'ground_truth': test_payoffs
-        }
+        train_y = y[self.trainer.train_indices]
+        return self.trainer.evaluate(X, y, indices, train_y)
 
-        return metrics
+    def _prepare_training_data(self):
+        """Convert triple_indices to concatenated embeddings."""
+        return np.array([
+            np.concatenate([
+                self.p1_embeddings[p1_idx],
+                self.p2_embeddings[p2_idx],
+                self.state_tensors[state_idx]
+            ])
+            for p1_idx, p2_idx, state_idx in self.triple_indices
+        ])
 
-class ExploitabilityPredictorTrainer:
-    """We use the term "exploitability" loosely here.
-    What we actually predict is the expected payoff of the BR to the policy."""
+
+class ExploitabilityPredictorRefactored:
+    """
+    Predicts exploitability (best response payoff) for policies.
+
+    Evaluates how much a policy can be exploited by a best-responding opponent.
+    """
+
     def __init__(
-            self,
-            game,
-            policies: list[Policy],
-            embeddings: list[np.ndarray],
-            player_id: int,
-            hidden_dims: List[int],
-            learning_rate: float = 1e-4,
-            dropout: float = 0.0,
-            device: str = "cpu",
+        self,
+        game,
+        policies: List[Policy],
+        embeddings: np.ndarray,
+        model_config: ModelConfig,
+        player_id: int = 0,
+        device: str = "cpu"
     ):
+        """
+        Initialize ExploitabilityPredictor.
+
+        Args:
+            game: OpenSpiel game instance
+            policies: List of policies to evaluate
+            embeddings: Policy embeddings
+            model_config: Model configuration
+            player_id: Which player perspective (0 or 1)
+            device: Device for computation
+        """
+        # Domain setup
         self.game = game
         self.initial_state = game.new_initial_state()
         self.policies = policies
-        self.embeddings = torch.tensor(embeddings).to(device)
         self.player_id = player_id
-        self.embedding_dim = embeddings[0].shape[0]
-        self.model = PayoffModel(
-            self.embedding_dim,
-            hidden_dims=hidden_dims,
-            dropout=dropout,
-        ).to(device)
-        self.device = device
-        self.learning_rate = learning_rate
-        self.compute_ground_truth_payoffs()
-        num_policies = len(self.policies)
-        TRAIN_PROPORTION = 0.8
-        perm = np.random.permutation(num_policies)
-        self.train_indices = perm[:int(num_policies * TRAIN_PROPORTION)]
-        self.val_indices = perm[int(num_policies * TRAIN_PROPORTION):]
+        self.embeddings_array = np.array(embeddings)
+
+        # Create trainer via composition
+        embedding_dim = self.embeddings_array.shape[1]
+        self.trainer = ModelTrainer(embedding_dim, model_config, device)
+
+        # Domain state
+        self.ground_truth_payoffs = None
+        self.all_states = None
+        self.state_to_information_state = None
+        self.best_response_processor = None
+
     def compute_ground_truth_payoffs(self):
-        # copied from psro_v2/best_response_oracle.py
+        """Compute ground truth exploitability using best response oracle."""
+        print(f"Computing best response payoffs for {len(self.policies)} policies...")
+
         best_responder_id = 1 - self.player_id
-        self.ground_truth_payoffs = torch.zeros(len(self.policies))
-        game = self.game
+
+        # Compute all states and info states
         self.all_states, self.state_to_information_state = (
             psro_utils.compute_states_and_info_states_if_none(
-                game, None, None))
-        policy = UniformRandomPolicy(game)
-        policy_to_dict = policy_utils.policy_to_dict(
-            policy, game, self.all_states, self.state_to_information_state)
-
-        # pylint: disable=g-complex-comprehension
-        # Cache TabularBestResponse for players, due to their costly construction
-        # TODO(b/140426861): Use a single best-responder once the code supports
-        # multiple player ids.
-        self.best_response_processor = pyspiel.TabularBestResponse(game, best_responder_id, policy_to_dict,)
-            # pyspiel.TabularBestResponse(game, best_responder_id, policy_to_dict,
-            #                             prob_cut_threshold,
-            #                             action_value_tolerance)
-        self.best_responder = best_response.CPPBestResponsePolicy(
-                game, best_responder_id, policy, self.all_states,
-                self.state_to_information_state,
-                self.best_response_processor
+                self.game, None, None
             )
-        for i, policy in enumerate(tqdm(self.policies, desc="computing best response policies")):
+        )
+
+        # Create dummy policy for initializing best response
+        policy = UniformRandomPolicy(self.game)
+        policy_to_dict = policy_utils.policy_to_dict(
+            policy, self.game, self.all_states, self.state_to_information_state
+        )
+
+        # Create best response processor
+        self.best_response_processor = TabularBestResponse(
+            self.game, best_responder_id, policy_to_dict
+        )
+
+        # Compute best response value for each policy
+        payoffs = []
+        for policy in tqdm(self.policies, desc="Computing best responses"):
             self.best_response_processor.set_policy(
-              policy_utils.policy_to_dict(policy, game, self.all_states,
-                                          self.state_to_information_state))
-            self.best_responder = (
-                best_response.CPPBestResponsePolicy(
-                    game, best_responder_id, policy, self.all_states,
-                    self.state_to_information_state,
-                    self.best_response_processor))
-            self.ground_truth_payoffs[i] = self.best_responder.value(self.initial_state).item()
-            # breakpoint()
-        self.ground_truth_payoffs = self.ground_truth_payoffs.to(self.device)
+                policy_utils.policy_to_dict(
+                    policy, self.game, self.all_states, self.state_to_information_state
+                )
+            )
+            best_responder = best_response.CPPBestResponsePolicy(
+                self.game, best_responder_id, policy, self.all_states,
+                self.state_to_information_state, self.best_response_processor
+            )
+            payoff = best_responder.value(self.initial_state)
+            payoffs.append(payoff)
 
-    def evaluate(self, eval_set: str = "all"):
+        self.ground_truth_payoffs = np.array(payoffs)
+        return self.ground_truth_payoffs
+
+    def train_with_agent_level_split(self, validation_split: float = 0.2):
         """
-        Evaluate the model on exploitability predictions.
+        Train with agent-level splitting to avoid leakage.
+
+        Args:
+            validation_split: Fraction of policies for validation
+
+        Returns:
+            dict: Training history
         """
-        if eval_set == "train" and self.train_indices is not None:
-            indices = self.train_indices
-            test_payoffs = self.ground_truth_payoffs[indices]
-            print(f"Evaluating on training set ({len(indices)})...")
-        elif eval_set == "val" and self.val_indices is not None:
-            indices = self.val_indices
-            test_payoffs = self.ground_truth_payoffs[indices]
-            print(f"Evaluating on validation set ({len(indices)})...")
-        elif eval_set == "all":
-            test_payoffs = self.ground_truth_payoffs
-            print(f"Evaluating on all triples ({len(test_payoffs)})...")
+        # Compute ground truth if needed
+        if self.ground_truth_payoffs is None:
+            self.compute_ground_truth_payoffs()
+
+        # Prepare data
+        X = self.embeddings_array
+        y = self.ground_truth_payoffs
+
+        # Agent-level split (simple for exploitability - just policies, not pairs)
+        n_policies = len(self.policies)
+        n_val = max(1, int(n_policies * validation_split))
+        if n_val >= n_policies:
+            raise ValueError(f"Not enough policies ({n_policies}) for train/val split. Need at least 2.")
+
+        policy_perm = np.random.permutation(n_policies)
+        val_indices = policy_perm[:n_val]
+        train_indices = policy_perm[n_val:]
+
+        print(f"Split summary: {len(train_indices)} training policies, {len(val_indices)} validation policies")
+
+        # Set indices on trainer
+        self.trainer.train_indices = train_indices
+        self.trainer.val_indices = val_indices
+
+        # Delegate training to ModelTrainer
+        if self.trainer.model_config.model_type == "random_forest":
+            return self.trainer._train_random_forest(X, y, train_indices, val_indices)
         else:
-            raise ValueError(f"Invalid eval_set: {eval_set}. Must be 'all', 'train', or 'val'. "
-                           f"Also ensure train() has been called to create the split.")
-        predictions = self.model(self.embeddings[indices])
-        # breakpoint()
-        metrics = {
-            'mse': ((predictions - test_payoffs) ** 2).mean(),
-            'mae': (predictions - test_payoffs).abs().mean(),
-            'predictions': predictions,
-            'ground_truth': test_payoffs
-        }
-        return metrics
-    
-    def train(self):
-        batch_size = 32
-        self.criterion = nn.MSELoss()
-        verbose = True
-        num_epochs = 5000
+            return self.trainer._train_neural_network(X, y, train_indices, val_indices)
 
-        embeddings = self.embeddings
-        train_indices = torch.tensor(self.train_indices, device=self.device)
-        val_indices = torch.tensor(self.val_indices, device=self.device)
-        self.model.train()
-        X_train = torch.tensor(embeddings[train_indices], device=self.device)
-        y_train = torch.tensor(self.ground_truth_payoffs[train_indices], device=self.device)
-        X_val = torch.tensor(embeddings[val_indices], device=self.device)
-        y_val = torch.tensor(self.ground_truth_payoffs[val_indices], device=self.device)
+    def evaluate(self, eval_set: str = "val"):
+        """Prepare data and delegate evaluation to ModelTrainer."""
+        X = self.embeddings_array
+        y = self.ground_truth_payoffs
 
-        # Initialize optimizer
-        self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        if eval_set == "train":
+            indices = self.trainer.train_indices
+        elif eval_set == "val":
+            indices = self.trainer.val_indices
+        elif eval_set == "all":
+            indices = np.arange(len(y))
+        else:
+            raise ValueError(f"Invalid eval_set: {eval_set}. Must be 'train', 'val', or 'all'")
 
-        # Training history
-        history = {
-            'train_loss': [],
-            'val_loss': []
-        }
-
-        # Early stopping
-        best_val_loss = float('inf')
-        patience_counter = 0
-        patience = 50
-
-        # Training loop
-        for epoch in range(num_epochs):
-            self.model.train()
-
-            # Shuffle training data
-            perm = torch.randperm(len(X_train))
-            X_train_shuffled = X_train[perm]
-            y_train_shuffled = y_train[perm]
-
-            train_losses = []
-
-            # Mini-batch training
-            for i in range(0, len(X_train), batch_size):
-                batch_X = X_train_shuffled[i:i+batch_size]
-                batch_y = y_train_shuffled[i:i+batch_size]
-
-                self.optimizer.zero_grad()
-                predictions = self.model(batch_X)
-                loss = self.criterion(predictions, batch_y)
-
-                loss.backward()
-                self.optimizer.step()
-
-                train_losses.append(loss.item())
-
-            # Validation
-            self.model.eval()
-            with torch.no_grad():
-                val_predictions = self.model(X_val)
-                val_loss = self.criterion(val_predictions, y_val)
-
-            # Record history
-            epoch_train_loss = np.mean(train_losses)
-            epoch_val_loss = val_loss.item()
-            history['train_loss'].append(epoch_train_loss)
-            history['val_loss'].append(epoch_val_loss)
-
-            # Early stopping check
-            if epoch_val_loss < best_val_loss:
-                best_val_loss = epoch_val_loss
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    print(f"Early stopping at epoch {epoch+1} - validation loss plateaued")
-                    break
-
-            if verbose and (epoch + 1) % 10 == 0:
-                print(f"Epoch {epoch+1}/{num_epochs} - "
-                      f"Train Loss: {epoch_train_loss:.6f}, "
-                      f"Val Loss: {epoch_val_loss:.6f}")
-
-        return history
-            
-
+        train_y = y[self.trainer.train_indices]
+        return self.trainer.evaluate(X, y, indices, train_y)

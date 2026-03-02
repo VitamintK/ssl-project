@@ -178,3 +178,61 @@ logger.addHandler(logging.StreamHandler())
 When creating interpolated NEUPL policies, two modes available:
 1. `interpolate_prenorm=True/False`: Whether to normalize embeddings before/after interpolation
 2. `sampling_mode="linear"/"gaussian"`: Linear interpolation between pairs vs. sampling from Gaussian distribution fit to embeddings
+
+## Refactored Architecture (IN PROGRESS)
+
+**NOTE**: A major refactoring is underway to standardize downstream task architecture. See [REFACTORING_GUIDE.md](REFACTORING_GUIDE.md) for details.
+
+### New Modules (Partially Completed)
+
+**[config.py](config.py)** - Configuration dataclasses (✅ Complete)
+- `ModelConfig`: Unified settings for all predictor types (mlp, linear, random_forest)
+- `TaskAConfig`, `TaskBConfig`, `TaskCConfig`, `TaskDConfig`: Task-specific configurations
+- Benefits: Type safety, centralized defaults, easy serialization
+
+**[downstream_refactored.py](downstream_refactored.py)** - Unified predictor architecture (⏳ Partial)
+- `BasePredictor`: Abstract base class eliminating ~300 lines of duplication
+  - Single implementation of model creation (factory pattern)
+  - Single implementation of random_forest training
+  - Single implementation of neural network training
+  - Single implementation of evaluation with training set mean baseline
+- `PayoffPredictorRefactored`: Concrete implementation for Tasks A & B (✅ Complete)
+- TODO: `StatePayoffPredictorRefactored`, `ExploitabilityPredictorRefactored`
+
+**[tasks.py](tasks.py)** - Unified task interface (⏳ Partial)
+- `run_task_a()`: Consolidates 3 Task A variants, always registers results (✅ Complete)
+- TODO: `run_task_b()`, `run_task_c()`, `run_task_d()`
+
+### Key Improvements
+
+1. **Random Forest Support**: Now available for ALL tasks (was only Task A before)
+2. **Consistent Result Registration**: All tasks register results (was only 2 of 4 before)
+3. **Standardized Baselines**: Training set mean everywhere (was mixed before)
+4. **Config-Driven**: Hyperparameters in dataclasses, not scattered hardcoded values
+5. **Separation of Concerns**: Agent generation in main.py, prediction in tasks.py
+
+### Usage Example
+
+```python
+from config import TaskAConfig, ModelConfig
+from tasks import run_task_a
+
+# Configure task
+config = TaskAConfig(
+    model_config=ModelConfig(model_type="random_forest"),  # or "mlp" or "linear"
+    validation_split=0.2
+)
+
+# Run task (requires pre-generated policies/embeddings)
+results = run_task_a(
+    game=game,
+    policies=policies,
+    embeddings=embeddings,
+    config=config,
+    exp_label="kuhn_poker_rf_task_a",
+    device="cpu"
+)
+
+# Access results
+print(f"MSE: {results['val_metrics']['mse']:.6f}")
+```
