@@ -20,6 +20,7 @@ from open_spiel.python import policy as policy_lib
 from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
 from utils import PPOAgentPolicy, get_device_string, make_diverse_random_kuhn_poker_layer_init
 from downstream import PayoffPredictor, StatePayoffPredictor, set_seed, sample_random_states
+from config import ModelConfig
 from trajectory_encoder import (
     TrajectoryEncoderConfig,
     TrajectoryEncoderTrainer,
@@ -194,19 +195,13 @@ def test_downstream_task_a_with_trajectory_encoder(
         p2_policies=[opponent_policy],
         p1_embeddings=[encoder_fn(agent).detach().cpu().numpy() for agent in downstream_task_ppo_agents],
         p2_embeddings=[np.array([0])],
-        hidden_dims=hidden_dims,
-        dropout=0.2,
+        model_config=ModelConfig(hidden_dims=hidden_dims, dropout=0.2, num_epochs=100, batch_size=16, learning_rate=1e-4),
         device="cpu"
     )
 
     logger.info("\nTraining predictor model...")
-    history = predictor.train(
-        num_epochs=100,
-        batch_size=16,
-        learning_rate=1e-4,
-        validation_split=0.2,
-        verbose=True
-    )
+    predictor.compute_ground_truth_payoffs()
+    history = predictor.train_with_agent_level_split(validation_split=0.2)
 
     # Evaluate on validation set
     logger.info("\nEvaluating model on validation set...")
@@ -216,8 +211,8 @@ def test_downstream_task_a_with_trajectory_encoder(
     logger.info(f"MAE: {val_metrics['mae']:.6f}")
 
     # Baseline: predict mean of training set for everything
-    train_payoffs = predictor.ground_truth_payoffs[predictor.train_indices]
-    val_payoffs = predictor.ground_truth_payoffs[predictor.val_indices]
+    train_payoffs = predictor.ground_truth_payoffs[predictor.trainer.train_indices]
+    val_payoffs = predictor.ground_truth_payoffs[predictor.trainer.val_indices]
     mean_payoff = np.mean(train_payoffs)
     baseline_mse = np.mean((val_payoffs - mean_payoff) ** 2)
     baseline_mae = np.mean(np.abs(val_payoffs - mean_payoff))
@@ -333,19 +328,13 @@ def test_downstream_task_b_with_trajectory_encoder(
         p2_policies=[PPOAgentPolicy(game, agent, 1, False) for agent in downstream_task_ppo_agents],
         p1_embeddings=[encoder_fn(agent).detach().cpu().numpy() for agent in downstream_task_ppo_agents],
         p2_embeddings=[encoder_fn(agent).detach().cpu().numpy() for agent in downstream_task_ppo_agents],
-        hidden_dims=hidden_dims,
-        dropout=0.2,
+        model_config=ModelConfig(hidden_dims=hidden_dims, dropout=0.2, num_epochs=100, batch_size=16, learning_rate=1e-4),
         device="cpu"
     )
 
     logger.info("\nTraining predictor model...")
-    history = predictor.train(
-        num_epochs=100,
-        batch_size=16,
-        learning_rate=1e-4,
-        validation_split=0.2,
-        verbose=True
-    )
+    predictor.compute_ground_truth_payoffs()
+    history = predictor.train_with_agent_level_split(validation_split=0.2)
 
     # Evaluate on validation set
     logger.info("\nEvaluating model on validation set...")
@@ -355,8 +344,8 @@ def test_downstream_task_b_with_trajectory_encoder(
     logger.info(f"MAE: {val_metrics['mae']:.6f}")
 
     # Baseline: predict mean of training set for everything
-    train_payoffs = predictor.ground_truth_payoffs[predictor.train_indices]
-    val_payoffs = predictor.ground_truth_payoffs[predictor.val_indices]
+    train_payoffs = predictor.ground_truth_payoffs[predictor.trainer.train_indices]
+    val_payoffs = predictor.ground_truth_payoffs[predictor.trainer.val_indices]
     mean_payoff = np.mean(train_payoffs)
     baseline_mse = np.mean((val_payoffs - mean_payoff) ** 2)
     baseline_mae = np.mean(np.abs(val_payoffs - mean_payoff))
@@ -466,32 +455,23 @@ def test_downstream_task_c_with_trajectory_encoder(
             for _ in range(NUM_AGENTS_DOWNSTREAM)
         ]
 
-    # Create state sampler function
     NUM_STATES = 100
-    def state_sampler(game, num_states):
-        return sample_random_states(game, num_states, max_depth=10)
 
     predictor = StatePayoffPredictor(
         game=game,
-        p1_agents=downstream_task_ppo_agents,
-        p2_agents=downstream_task_ppo_agents,
-        p1_encoder_fn=encoder_fn,
-        p2_encoder_fn=encoder_fn,
-        state_sampler=state_sampler,
-        num_states_per_pair=NUM_STATES,
-        hidden_dims=hidden_dims,
-        dropout=0.2,
+        p1_policies=[PPOAgentPolicy(game, agent, 0, False) for agent in downstream_task_ppo_agents],
+        p2_policies=[PPOAgentPolicy(game, agent, 1, False) for agent in downstream_task_ppo_agents],
+        p1_embeddings=[encoder_fn(agent).detach().cpu().numpy() for agent in downstream_task_ppo_agents],
+        p2_embeddings=[encoder_fn(agent).detach().cpu().numpy() for agent in downstream_task_ppo_agents],
+        model_config=ModelConfig(hidden_dims=hidden_dims, dropout=0.2, num_epochs=100, batch_size=16, learning_rate=1e-4),
+        num_states=NUM_STATES,
+        max_depth=10,
         device="cpu"
     )
 
     logger.info("\nTraining predictor model...")
-    history = predictor.train(
-        num_epochs=100,
-        batch_size=16,
-        learning_rate=1e-4,
-        validation_split=0.2,
-        verbose=True
-    )
+    predictor.compute_ground_truth_payoffs()
+    history = predictor.train_with_agent_level_split(validation_split=0.2)
 
     # Evaluate on validation set
     logger.info("\nEvaluating model on validation set...")
@@ -501,8 +481,8 @@ def test_downstream_task_c_with_trajectory_encoder(
     logger.info(f"MAE: {val_metrics['mae']:.6f}")
 
     # Baseline: predict mean of training set for everything
-    train_payoffs = predictor.ground_truth_payoffs[predictor.train_indices]
-    val_payoffs = predictor.ground_truth_payoffs[predictor.val_indices]
+    train_payoffs = predictor.ground_truth_payoffs[predictor.trainer.train_indices]
+    val_payoffs = predictor.ground_truth_payoffs[predictor.trainer.val_indices]
     mean_payoff = np.mean(train_payoffs)
     baseline_mse = np.mean((val_payoffs - mean_payoff) ** 2)
     baseline_mae = np.mean(np.abs(val_payoffs - mean_payoff))

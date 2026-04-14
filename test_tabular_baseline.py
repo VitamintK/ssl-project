@@ -24,6 +24,7 @@ from open_spiel.python.algorithms import get_all_states
 from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
 from utils import PPOAgentPolicy, get_device_string, make_diverse_random_kuhn_poker_layer_init
 from downstream import PayoffPredictor, set_seed
+from config import ModelConfig
 
 
 logger = logging.getLogger(__name__)
@@ -87,20 +88,17 @@ def test_task_a(game, embeddings, downstream_agents, seed=42):
         p2_policies=[opponent_policy],
         p1_embeddings=embeddings,
         p2_embeddings=[np.array([0])],
-        hidden_dims=[],  # linear probe
-        dropout=0.2,
+        model_config=ModelConfig(hidden_dims=[], dropout=0.2, num_epochs=100, batch_size=16, learning_rate=1e-4),
         device="cpu",
     )
 
     logger.info("Training linear probe...")
-    history = predictor.train(
-        num_epochs=100, batch_size=16, learning_rate=1e-4,
-        validation_split=0.2, verbose=True,
-    )
+    predictor.compute_ground_truth_payoffs()
+    history = predictor.train_with_agent_level_split(validation_split=0.2)
 
     val_metrics = predictor.evaluate(eval_set="val")
-    train_payoffs = predictor.ground_truth_payoffs[predictor.train_indices]
-    val_payoffs = predictor.ground_truth_payoffs[predictor.val_indices]
+    train_payoffs = predictor.ground_truth_payoffs[predictor.trainer.train_indices]
+    val_payoffs = predictor.ground_truth_payoffs[predictor.trainer.val_indices]
     mean_payoff = np.mean(train_payoffs)
     baseline_mse = np.mean((val_payoffs - mean_payoff) ** 2)
 
@@ -126,20 +124,17 @@ def test_task_b(game, embeddings, downstream_agents, seed=42):
         p2_policies=[PPOAgentPolicy(game, agent, 1, False) for agent in downstream_agents],
         p1_embeddings=embeddings,
         p2_embeddings=embeddings,
-        hidden_dims=[],  # linear probe
-        dropout=0.2,
+        model_config=ModelConfig(hidden_dims=[], dropout=0.2, num_epochs=100, batch_size=16, learning_rate=1e-4),
         device="cpu",
     )
 
     logger.info("Training linear probe...")
-    history = predictor.train(
-        num_epochs=100, batch_size=16, learning_rate=1e-4,
-        validation_split=0.2, verbose=True,
-    )
+    predictor.compute_ground_truth_payoffs()
+    history = predictor.train_with_agent_level_split(validation_split=0.2)
 
     val_metrics = predictor.evaluate(eval_set="val")
-    train_payoffs = predictor.ground_truth_payoffs[predictor.train_indices]
-    val_payoffs = predictor.ground_truth_payoffs[predictor.val_indices]
+    train_payoffs = predictor.ground_truth_payoffs[predictor.trainer.train_indices]
+    val_payoffs = predictor.ground_truth_payoffs[predictor.trainer.val_indices]
     mean_payoff = np.mean(train_payoffs)
     baseline_mse = np.mean((val_payoffs - mean_payoff) ** 2)
 

@@ -151,22 +151,23 @@ def evaluate_payoff_prediction(name, game, encoder_fn, agents, device):
         emb = encoder_fn(agent).detach().cpu().numpy()
         embeddings.append(emb)
 
+    from config import ModelConfig
     predictor = PayoffPredictor(
         game=game,
         p1_policies=[PPOAgentPolicy(game, a, 0, False) for a in agents],
         p2_policies=[opponent],
         p1_embeddings=embeddings,
         p2_embeddings=[np.array([0])],
-        hidden_dims=[],  # linear probe
-        dropout=0.0,
+        model_config=ModelConfig(hidden_dims=[], dropout=0.0, num_epochs=100, batch_size=16, learning_rate=1e-4),
         device="cpu",
     )
 
-    predictor.train(num_epochs=100, batch_size=16, learning_rate=1e-4, validation_split=0.2, verbose=False)
+    predictor.compute_ground_truth_payoffs()
+    predictor.train_with_agent_level_split(validation_split=0.2)
     val_metrics = predictor.evaluate(eval_set="val")
 
-    train_payoffs = predictor.ground_truth_payoffs[predictor.train_indices]
-    val_payoffs = predictor.ground_truth_payoffs[predictor.val_indices]
+    train_payoffs = predictor.ground_truth_payoffs[predictor.trainer.train_indices]
+    val_payoffs = predictor.ground_truth_payoffs[predictor.trainer.val_indices]
     baseline_mse = np.mean((val_payoffs - np.mean(train_payoffs)) ** 2)
 
     improvement = (1 - val_metrics["mse"] / baseline_mse) * 100
@@ -192,22 +193,23 @@ def evaluate_pairwise_payoff(name, game, encoder_fn, agents, device):
         emb = encoder_fn(agent).detach().cpu().numpy()
         embeddings.append(emb)
 
+    from config import ModelConfig
     predictor = PayoffPredictor(
         game=game,
         p1_policies=[PPOAgentPolicy(game, a, 0, False) for a in agents],
         p2_policies=[PPOAgentPolicy(game, a, 1, False) for a in agents],
         p1_embeddings=embeddings,
         p2_embeddings=embeddings,
-        hidden_dims=[],  # linear probe
-        dropout=0.0,
+        model_config=ModelConfig(hidden_dims=[], dropout=0.0, num_epochs=100, batch_size=16, learning_rate=1e-4),
         device="cpu",
     )
 
-    predictor.train(num_epochs=100, batch_size=16, learning_rate=1e-4, validation_split=0.2, verbose=False)
+    predictor.compute_ground_truth_payoffs()
+    predictor.train_with_agent_level_split(validation_split=0.2)
     val_metrics = predictor.evaluate(eval_set="val")
 
-    train_payoffs = predictor.ground_truth_payoffs[predictor.train_indices]
-    val_payoffs = predictor.ground_truth_payoffs[predictor.val_indices]
+    train_payoffs = predictor.ground_truth_payoffs[predictor.trainer.train_indices]
+    val_payoffs = predictor.ground_truth_payoffs[predictor.trainer.val_indices]
     baseline_mse = np.mean((val_payoffs - np.mean(train_payoffs)) ** 2)
 
     improvement = (1 - val_metrics["mse"] / baseline_mse) * 100
