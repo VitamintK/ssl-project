@@ -53,12 +53,23 @@ def load_trajectory_encoder_from_checkpoint(checkpoint_path: str, game: pyspiel.
     """
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
-    config = checkpoint['config']
-    config.device = device  # Update device in case it's different
+    if 'config' in checkpoint:
+        config = checkpoint['config']
+        config.device = device  # Update device in case it's different
+    else:
+        # Fallback for checkpoints saved without config (e.g. payoff-contrastive)
+        from trajectory_encoder import TrajectoryEncoderConfig
+        config = TrajectoryEncoderConfig(
+            hidden_dim=128, num_layers=4, num_heads=8, dropout=0.1,
+            num_transitions=200, trajectories_per_policy=50,
+            batch_size=8, epochs=50, lr=1e-4, weight_decay=1e-5,
+            temperature=0.07, val_split=0.2, lr_scheduler="cosine",
+            normalize=True, device=device, seed=42,
+        )
 
     # Create model and load state dict
     from trajectory_encoder import TrajectoryEncoder
-    state_dim = game.information_state_tensor_shape()[0]
+    state_dim = int(np.prod(game.information_state_tensor_shape()))
     action_dim = game.num_distinct_actions()
 
     # Use default max_seq_len=512 to match checkpoint (not num_transitions)
@@ -521,67 +532,58 @@ def test_downstream_task_c_with_trajectory_encoder(
 
 
 if __name__ == "__main__":
-    # Configuration
-    USE_PSRO_AGENTS = False  # Set to True to use PSRO agents instead of random agents
-    PSRO_HIDDEN_SIZE = 256   # Hidden size for PSRO agents (if USE_PSRO_AGENTS=True)
+    import argparse
 
-    # Set seed for reproducibility
-    seed = 42
-    set_seed(seed)
-    logger.info(f"Set random seed to {seed}")
+    parser = argparse.ArgumentParser(description="Test Trajectory encoder on Tasks A and B")
+    parser.add_argument("--game", type=str, default="kuhn_poker",
+                        choices=["kuhn_poker", "leduc_poker"])
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Path to trajectory encoder checkpoint")
+    parser.add_argument("--agent-pool", type=str, default=None,
+                        help="Path to saved agent pool (from generate_agents.py)")
+    parser.add_argument("--num-agents", type=int, default=500)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", type=str, default=None)
+    args = parser.parse_args()
 
-    device = get_device_string()
+    set_seed(args.seed)
+    device = args.device or get_device_string()
     logger.info(f"Using device: {device}")
 
-    game_name = "kuhn_poker"
+    game_name = args.game
     game = pyspiel.load_game(game_name)
 
-    # Load opponent pool for encoder (should match what encoder was trained on)
-    if USE_PSRO_AGENTS:
-        logger.info(f"\nLoading PSRO policies for encoder opponent pool...")
-        encoder_opponent_pool = load_ppo_agents_from_single_psro_folder(
-            game_short_name=game_name,
-            hidden_size=PSRO_HIDDEN_SIZE,
-            shuffle=True,
-            player_id=0,
-            folder_selection='newest'
-        )
-        logger.info(f"Loaded {len(encoder_opponent_pool)} PSRO policies for opponent pool")
+    # Load or create agents
+    if args.agent_pool:
+        from generate_agents import load_agents
+        logger.info(f"\nLoading agents from {args.agent_pool}...")
+        pretrain_agents, downstream_agents = load_agents(args.agent_pool, game)
+        encoder_opponent_pool = pretrain_agents
     else:
-        logger.info(f"\nUsing uniform random opponent pool (encoder trained on random agents)")
-        encoder_opponent_pool = None  # Will use uniform random opponent
+        info_state_size = game.information_state_tensor_shape()
+        num_actions = game.num_distinct_actions()
+        PPO_AGENT_HIDDEN_SIZE = 256
+        layer_init = make_diverse_random_kuhn_poker_layer_init(game)
+
+        encoder_opponent_pool = None
+        logger.info("\nCreating random agents for downstream tasks...")
+        downstream_agents = [
+            PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE)
+            for _ in range(args.num_agents)
+        ]
+        logger.info(f"Created {len(downstream_agents)} random agents for downstream tasks")
 
     # Load pre-trained trajectory encoder
-    checkpoint_path = "checkpoints/trajectory_encoder_kuhn_random_improved_500.pt"
+    checkpoint_path = args.checkpoint
+    if checkpoint_path is None:
+        checkpoint_path = f"checkpoints/trajectory_encoder_{game_name}_random_improved_500.pt"
     logger.info(f"\nLoading pre-trained encoder from {checkpoint_path}...")
     pretrained_encoder = load_trajectory_encoder_from_checkpoint(
         checkpoint_path,
         game,
-        policies=encoder_opponent_pool,  # Pass policies for consistent opponent distribution
+        policies=encoder_opponent_pool,
         device=device
     )
-
-    # Create or load agents for downstream tasks
-    info_state_size = game.information_state_tensor_shape()
-    num_actions = game.num_distinct_actions()
-    PPO_AGENT_HIDDEN_SIZE = 256
-    layer_init = make_diverse_random_kuhn_poker_layer_init(game)
-
-    if USE_PSRO_AGENTS:
-        # Load PSRO agents using the built-in function
-        logger.info(f"\nLoading PSRO agents with hidden_size={PSRO_HIDDEN_SIZE}...")
-        all_psro_agents = load_ppo_agents_from_single_psro_folder(game_short_name=game_name, hidden_size=PSRO_HIDDEN_SIZE, shuffle=True, player_id=0, folder_selection=0)
-        logger.info(f"Loaded {len(all_psro_agents)} PSRO agents")
-        downstream_agents = all_psro_agents[:120] if len(all_psro_agents) >= 50 else all_psro_agents
-        logger.info(f"Using {len(downstream_agents)} PSRO agents for downstream tasks")
-    else:
-        # Create random agents for downstream tasks
-        logger.info("\nCreating random agents for downstream tasks...")
-        downstream_agents = [
-            PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE)
-            for _ in range(500)
-        ]
-        logger.info(f"Created {len(downstream_agents)} random agents for downstream tasks")
 
     # Test Task A
     logger.info("\n" + "="*80)
@@ -600,18 +602,6 @@ if __name__ == "__main__":
     logger.info("TESTING TASK B")
     logger.info("="*80)
     test_downstream_task_b_with_trajectory_encoder(
-        game,
-        predictor_type="linear",
-        downstream_task_ppo_agents=downstream_agents,
-        device=device,
-        pretrained_encoder=pretrained_encoder
-    )
-
-    # Test Task C
-    logger.info("\n" + "="*80)
-    logger.info("TESTING TASK C")
-    logger.info("="*80)
-    test_downstream_task_c_with_trajectory_encoder(
         game,
         predictor_type="linear",
         downstream_task_ppo_agents=downstream_agents,
