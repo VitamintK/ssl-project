@@ -1,210 +1,382 @@
 {
   "run": [
     {
-      "experiment_label": "leduc_poker neupl p0 randloss=True N=1000 Task A",
-      "config": {
-        "game": "leduc_poker",
-        "agent_source": "neupl",
-        "player_id": 0,
-        "task": "task_a",
-        "task_a_predictor_type": "random_forest",
-        "neupl_use_randall_loss": true,
-        "neupl_num_policies": 1000
-      },
+      "experiment_label": "kuhn_poker neupl p0 randloss=False N=1000 Task E",
       "results": [
         {
-          "mse": 0.260518298227149,
-          "baseline_mse": 0.3146058917045593
+          "val_metrics": {
+            "avg_empirical_payoff": 0.2277500182390213,
+            "avg_exact_exploitability": 0.23367954790592194,
+            "num_policies": 200
+          },
+          "config": {
+            "model_config": {
+              "model_type": null,
+              "hidden_dims": null,
+              "dropout": 0.0,
+              "learning_rate": 0.0001,
+              "num_epochs": 5000,
+              "batch_size": 16,
+              "early_stopping_patience": 50,
+              "optimizer_type": "adamw"
+            },
+            "player_id": 0,
+            "validation_split": 0.2,
+            "num_steps_per_policy_per_epoch": 40,
+            "num_trajectories_per_policy_per_epoch": 7,
+            "epochs": 10,
+            "compare_to_control": true
+          },
+          "control_metrics": {
+            "avg_empirical_payoff": 0.2206999957561493,
+            "avg_exact_exploitability": 0.23367954790592194,
+            "num_policies": 200
+          }
         },
         {
-          "mse": 0.26039125806654384,
-          "baseline_mse": 0.2983112335205078
+          "val_metrics": {
+            "avg_empirical_payoff": 0.22642499208450317,
+            "avg_exact_exploitability": 0.23539677262306213,
+            "num_policies": 200
+          },
+          "config": {
+            "model_config": {
+              "model_type": null,
+              "hidden_dims": null,
+              "dropout": 0.0,
+              "learning_rate": 0.0001,
+              "num_epochs": 5000,
+              "batch_size": 16,
+              "early_stopping_patience": 50,
+              "optimizer_type": "adamw"
+            },
+            "player_id": 0,
+            "validation_split": 0.2,
+            "num_steps_per_policy_per_epoch": 40,
+            "num_trajectories_per_policy_per_epoch": 7,
+            "epochs": 10,
+            "compare_to_control": true
+          },
+          "control_metrics": {
+            "avg_empirical_payoff": 0.22979000210762024,
+            "avg_exact_exploitability": 0.23539677262306213,
+            "num_policies": 200
+          }
         },
         {
-          "mse": 0.2610263655225609,
-          "baseline_mse": 0.3771514892578125
+          "val_metrics": {
+            "avg_empirical_payoff": 0.21811248362064362,
+            "avg_exact_exploitability": 0.23221778869628906,
+            "num_policies": 200
+          },
+          "config": {
+            "model_config": {
+              "model_type": null,
+              "hidden_dims": null,
+              "dropout": 0.0,
+              "learning_rate": 0.0001,
+              "num_epochs": 5000,
+              "batch_size": 16,
+              "early_stopping_patience": 50,
+              "optimizer_type": "adamw"
+            },
+            "player_id": 0,
+            "validation_split": 0.2,
+            "num_steps_per_policy_per_epoch": 40,
+            "num_trajectories_per_policy_per_epoch": 7,
+            "epochs": 10,
+            "compare_to_control": true
+          },
+          "control_metrics": {
+            "avg_empirical_payoff": 0.2310899943113327,
+            "avg_exact_exploitability": 0.23221778869628906,
+            "num_policies": 200
+          }
         }
       ]
     },
     {
-      "experiment_label": "leduc_poker neupl p0 randloss=True N=1000 Task D",
-      "config": {
-        "game": "leduc_poker",
-        "agent_source": "neupl",
-        "player_id": 0,
-        "task": "task_d",
-        "task_d_predictor_type": "random_forest",
-        "neupl_use_randall_loss": true,
-        "neupl_num_policies": 1000
-      },
+      "experiment_label": "kuhn_poker neupl p0 randloss=True N=1000 Task E",
       "results": [
         {
-          "mse": 0.013849380426108837,
-          "baseline_mse": 0.04515521973371506
+          "val_metrics": {
+            "avg_empirical_payoff": 0.18101249635219574,
+            "avg_exact_exploitability": 0.19088022410869598,
+            "num_policies": 200
+          },
+          "config": {
+            "model_config": {
+              "model_type": null,
+              "hidden_dims": null,
+              "dropout": 0.0,
+              "learning_rate": 0.0001,
+              "num_epochs": 5000,
+              "batch_size": 16,
+              "early_stopping_patience": 50,
+              "optimizer_type": "adamw"
+            },
+            "player_id": 0,
+            "validation_split": 0.2,
+            "num_steps_per_policy_per_epoch": 40,
+            "num_trajectories_per_policy_per_epoch": 7,
+            "epochs": 10,
+            "compare_to_control": true
+          },
+          "control_metrics": {
+            "avg_empirical_payoff": 0.1458899974822998,
+            "avg_exact_exploitability": 0.19088022410869598,
+            "num_policies": 200
+          }
         },
         {
-          "mse": 0.01728253997862339,
-          "baseline_mse": 0.020156528800725937
+          "val_metrics": {
+            "avg_empirical_payoff": 0.1864374876022339,
+            "avg_exact_exploitability": 0.19044631719589233,
+            "num_policies": 200
+          },
+          "config": {
+            "model_config": {
+              "model_type": null,
+              "hidden_dims": null,
+              "dropout": 0.0,
+              "learning_rate": 0.0001,
+              "num_epochs": 5000,
+              "batch_size": 16,
+              "early_stopping_patience": 50,
+              "optimizer_type": "adamw"
+            },
+            "player_id": 0,
+            "validation_split": 0.2,
+            "num_steps_per_policy_per_epoch": 40,
+            "num_trajectories_per_policy_per_epoch": 7,
+            "epochs": 10,
+            "compare_to_control": true
+          },
+          "control_metrics": {
+            "avg_empirical_payoff": 0.1831900030374527,
+            "avg_exact_exploitability": 0.19044631719589233,
+            "num_policies": 200
+          }
         },
         {
-          "mse": 0.07130800187587738,
-          "baseline_mse": 0.07028059661388397
+          "val_metrics": {
+            "avg_empirical_payoff": 0.19425001740455627,
+            "avg_exact_exploitability": 0.1899595409631729,
+            "num_policies": 200
+          },
+          "config": {
+            "model_config": {
+              "model_type": null,
+              "hidden_dims": null,
+              "dropout": 0.0,
+              "learning_rate": 0.0001,
+              "num_epochs": 5000,
+              "batch_size": 16,
+              "early_stopping_patience": 50,
+              "optimizer_type": "adamw"
+            },
+            "player_id": 0,
+            "validation_split": 0.2,
+            "num_steps_per_policy_per_epoch": 40,
+            "num_trajectories_per_policy_per_epoch": 7,
+            "epochs": 10,
+            "compare_to_control": true
+          },
+          "control_metrics": {
+            "avg_empirical_payoff": 0.18707001209259033,
+            "avg_exact_exploitability": 0.1899595409631729,
+            "num_policies": 200
+          }
         }
       ]
     },
     {
-      "experiment_label": "leduc_poker neupl p1 randloss=True N=1000 Task A",
-      "config": {
-        "game": "leduc_poker",
-        "agent_source": "neupl",
-        "player_id": 1,
-        "task": "task_a",
-        "task_a_predictor_type": "random_forest",
-        "neupl_use_randall_loss": true,
-        "neupl_num_policies": 1000
-      },
+      "experiment_label": "kuhn_poker neupl p1 randloss=True N=1000 Task E",
       "results": [
         {
-          "mse": 0.28047833484796975,
-          "baseline_mse": 0.2818310558795929
+          "val_metrics": {
+            "avg_empirical_payoff": 0.0006375006050802767,
+            "avg_exact_exploitability": 0.1674339473247528,
+            "num_policies": 200
+          },
+          "config": {
+            "model_config": {
+              "model_type": null,
+              "hidden_dims": null,
+              "dropout": 0.0,
+              "learning_rate": 0.0001,
+              "num_epochs": 5000,
+              "batch_size": 16,
+              "early_stopping_patience": 50,
+              "optimizer_type": "adamw"
+            },
+            "player_id": 1,
+            "validation_split": 0.2,
+            "num_steps_per_policy_per_epoch": 40,
+            "num_trajectories_per_policy_per_epoch": 7,
+            "epochs": 10,
+            "compare_to_control": true
+          },
+          "control_metrics": {
+            "avg_empirical_payoff": -0.039000000804662704,
+            "avg_exact_exploitability": 0.1674339473247528,
+            "num_policies": 200
+          }
         },
         {
-          "mse": 0.2878114935807783,
-          "baseline_mse": 0.28071343898773193
+          "val_metrics": {
+            "avg_empirical_payoff": 0.10015000402927399,
+            "avg_exact_exploitability": 0.16464029252529144,
+            "num_policies": 200
+          },
+          "config": {
+            "model_config": {
+              "model_type": null,
+              "hidden_dims": null,
+              "dropout": 0.0,
+              "learning_rate": 0.0001,
+              "num_epochs": 5000,
+              "batch_size": 16,
+              "early_stopping_patience": 50,
+              "optimizer_type": "adamw"
+            },
+            "player_id": 1,
+            "validation_split": 0.2,
+            "num_steps_per_policy_per_epoch": 40,
+            "num_trajectories_per_policy_per_epoch": 7,
+            "epochs": 10,
+            "compare_to_control": true
+          },
+          "control_metrics": {
+            "avg_empirical_payoff": -0.024820001795887947,
+            "avg_exact_exploitability": 0.16464029252529144,
+            "num_policies": 200
+          }
         },
         {
-          "mse": 0.27272204364836455,
-          "baseline_mse": 0.26822537183761597
+          "val_metrics": {
+            "avg_empirical_payoff": 0.004225000273436308,
+            "avg_exact_exploitability": 0.16293708980083466,
+            "num_policies": 200
+          },
+          "config": {
+            "model_config": {
+              "model_type": null,
+              "hidden_dims": null,
+              "dropout": 0.0,
+              "learning_rate": 0.0001,
+              "num_epochs": 5000,
+              "batch_size": 16,
+              "early_stopping_patience": 50,
+              "optimizer_type": "adamw"
+            },
+            "player_id": 1,
+            "validation_split": 0.2,
+            "num_steps_per_policy_per_epoch": 40,
+            "num_trajectories_per_policy_per_epoch": 7,
+            "epochs": 10,
+            "compare_to_control": true
+          },
+          "control_metrics": {
+            "avg_empirical_payoff": -0.025059999898076057,
+            "avg_exact_exploitability": 0.16293708980083466,
+            "num_policies": 200
+          }
         }
       ]
     },
     {
-      "experiment_label": "leduc_poker neupl p1 randloss=True N=1000 Task D",
-      "config": {
-        "game": "leduc_poker",
-        "agent_source": "neupl",
-        "player_id": 1,
-        "task": "task_d",
-        "task_d_predictor_type": "random_forest",
-        "neupl_use_randall_loss": true,
-        "neupl_num_policies": 1000
-      },
+      "experiment_label": "kuhn_poker neupl p1 randloss=False N=1000 Task E",
       "results": [
         {
-          "mse": 0.0017584982560947537,
-          "baseline_mse": 0.012833595275878906
+          "val_metrics": {
+            "avg_empirical_payoff": 0.10097499936819077,
+            "avg_exact_exploitability": 0.18981444835662842,
+            "num_policies": 200
+          },
+          "config": {
+            "model_config": {
+              "model_type": null,
+              "hidden_dims": null,
+              "dropout": 0.0,
+              "learning_rate": 0.0001,
+              "num_epochs": 5000,
+              "batch_size": 16,
+              "early_stopping_patience": 50,
+              "optimizer_type": "adamw"
+            },
+            "player_id": 1,
+            "validation_split": 0.2,
+            "num_steps_per_policy_per_epoch": 40,
+            "num_trajectories_per_policy_per_epoch": 7,
+            "epochs": 10,
+            "compare_to_control": true
+          },
+          "control_metrics": {
+            "avg_empirical_payoff": 0.09134000539779663,
+            "avg_exact_exploitability": 0.18981444835662842,
+            "num_policies": 200
+          }
         },
         {
-          "mse": 0.0021049506030976772,
-          "baseline_mse": 0.014444644562900066
+          "val_metrics": {
+            "avg_empirical_payoff": 0.07970000058412552,
+            "avg_exact_exploitability": 0.1821107119321823,
+            "num_policies": 200
+          },
+          "config": {
+            "model_config": {
+              "model_type": null,
+              "hidden_dims": null,
+              "dropout": 0.0,
+              "learning_rate": 0.0001,
+              "num_epochs": 5000,
+              "batch_size": 16,
+              "early_stopping_patience": 50,
+              "optimizer_type": "adamw"
+            },
+            "player_id": 1,
+            "validation_split": 0.2,
+            "num_steps_per_policy_per_epoch": 40,
+            "num_trajectories_per_policy_per_epoch": 7,
+            "epochs": 10,
+            "compare_to_control": true
+          },
+          "control_metrics": {
+            "avg_empirical_payoff": 0.09055999666452408,
+            "avg_exact_exploitability": 0.1821107119321823,
+            "num_policies": 200
+          }
         },
         {
-          "mse": 0.0035344117786735296,
-          "baseline_mse": 0.02578214555978775
-        }
-      ]
-    },
-    {
-      "experiment_label": "leduc_poker neupl p0 randloss=False N=1000 Task A",
-      "config": {
-        "game": "leduc_poker",
-        "agent_source": "neupl",
-        "player_id": 0,
-        "task": "task_a",
-        "task_a_predictor_type": "random_forest",
-        "neupl_use_randall_loss": false,
-        "neupl_num_policies": 1000
-      },
-      "results": [
-        {
-          "mse": 0.2945054711259331,
-          "baseline_mse": 0.351296603679657
-        },
-        {
-          "mse": 0.28163691818627223,
-          "baseline_mse": 0.3861069977283478
-        },
-        {
-          "mse": 0.2549429927271894,
-          "baseline_mse": 0.260711133480072
-        }
-      ]
-    },
-    {
-      "experiment_label": "leduc_poker neupl p0 randloss=False N=1000 Task D",
-      "config": {
-        "game": "leduc_poker",
-        "agent_source": "neupl",
-        "player_id": 0,
-        "task": "task_d",
-        "task_d_predictor_type": "random_forest",
-        "neupl_use_randall_loss": false,
-        "neupl_num_policies": 1000
-      },
-      "results": [
-        {
-          "mse": 0.029354220256209373,
-          "baseline_mse": 0.07106677442789078
-        },
-        {
-          "mse": 0.04534660652279854,
-          "baseline_mse": 0.15062172710895538
-        },
-        {
-          "mse": 0.006002137437462807,
-          "baseline_mse": 0.017172258347272873
-        }
-      ]
-    },
-    {
-      "experiment_label": "leduc_poker neupl p1 randloss=False N=1000 Task A",
-      "config": {
-        "game": "leduc_poker",
-        "agent_source": "neupl",
-        "player_id": 1,
-        "task": "task_a",
-        "task_a_predictor_type": "random_forest",
-        "neupl_use_randall_loss": false,
-        "neupl_num_policies": 1000
-      },
-      "results": [
-        {
-          "mse": 0.299106391087517,
-          "baseline_mse": 0.2988184988498688
-        },
-        {
-          "mse": 0.2364530551831313,
-          "baseline_mse": 0.22932393848896027
-        },
-        {
-          "mse": 0.2894163914101149,
-          "baseline_mse": 0.2796688973903656
-        }
-      ]
-    },
-    {
-      "experiment_label": "leduc_poker neupl p1 randloss=False N=1000 Task D",
-      "config": {
-        "game": "leduc_poker",
-        "agent_source": "neupl",
-        "player_id": 1,
-        "task": "task_d",
-        "task_d_predictor_type": "random_forest",
-        "neupl_use_randall_loss": false,
-        "neupl_num_policies": 1000
-      },
-      "results": [
-        {
-          "mse": 0.006087583489716053,
-          "baseline_mse": 0.031181883066892624
-        },
-        {
-          "mse": 0.0067975143902003765,
-          "baseline_mse": 0.04033215343952179
-        },
-        {
-          "mse": 0.003176265861839056,
-          "baseline_mse": 0.011765602044761181
+          "val_metrics": {
+            "avg_empirical_payoff": 0.11248750984668732,
+            "avg_exact_exploitability": 0.18925537168979645,
+            "num_policies": 200
+          },
+          "config": {
+            "model_config": {
+              "model_type": null,
+              "hidden_dims": null,
+              "dropout": 0.0,
+              "learning_rate": 0.0001,
+              "num_epochs": 5000,
+              "batch_size": 16,
+              "early_stopping_patience": 50,
+              "optimizer_type": "adamw"
+            },
+            "player_id": 1,
+            "validation_split": 0.2,
+            "num_steps_per_policy_per_epoch": 40,
+            "num_trajectories_per_policy_per_epoch": 7,
+            "epochs": 10,
+            "compare_to_control": true
+          },
+          "control_metrics": {
+            "avg_empirical_payoff": 0.09730999916791916,
+            "avg_exact_exploitability": 0.18925537168979645,
+            "num_policies": 200
+          }
         }
       ]
     }
