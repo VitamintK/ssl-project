@@ -12,6 +12,9 @@ Uses composition pattern for clean separation of ML and domain logic.
 """
 
 from abc import ABC, abstractmethod
+import copy
+import os
+import time
 from typing import List, Callable, Any, Optional, Literal
 from tqdm import tqdm
 
@@ -21,14 +24,18 @@ import torch.optim as optim
 import numpy as np
 import random
 import pyspiel
+import matplotlib.pyplot as plt
 from open_spiel.python.algorithms.psro_v2.abstract_meta_trainer import sample_episode
 from open_spiel.python.policy import Policy, UniformRandomPolicy
 from pyspiel import TabularBestResponse
 from open_spiel.python.algorithms import policy_utils, best_response
 from open_spiel.python.algorithms.psro_v2 import utils as psro_utils
 
-from config import ModelConfig
-from utils import PPOAgentPolicy, get_expected_payoffs
+from iig_rl_benchmark.algorithms.ppo.ppo import PPOConditionedOnPolicyRepresentationAgent
+from iig_rl_benchmark.algorithms.ppo.ppo_wrapper import SimplePPOWrapper
+
+from config import ModelConfig, ExperimentInfo
+from utils import PPOAgentPolicy, PPONeuplAgentPolicy, PolicyAsAgent, get_device_string, get_expected_payoffs
 
 # Import sklearn only when needed
 try:
@@ -45,6 +52,22 @@ def set_seed(seed=42):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+def split_data(total_len: int, validation_split: float):
+    """
+    Create train/val split with random permutation.
+
+    Args:
+        total_len: Total number of data points
+        validation_split: Fraction for validation (0, 1)
+
+    Returns:
+        Tuple of (train_indices, val_indices)
+    """
+    n_val = max(1, int(total_len * validation_split))
+    perm = np.random.permutation(total_len)
+    return perm[n_val:], perm[:n_val]
 
 
 def get_state_tensor(state):
@@ -189,9 +212,7 @@ class ModelTrainer:
         Returns:
             Tuple of (train_indices, val_indices)
         """
-        n_val = max(1, int(total_len * validation_split))
-        perm = np.random.permutation(total_len)
-        return perm[n_val:], perm[:n_val]
+        return split_data(total_len, validation_split)
 
     def train(self, X: np.ndarray, y: np.ndarray, validation_split: float = 0.2):
         """
@@ -394,7 +415,7 @@ class ModelTrainer:
                 return self.model(X_tensor).cpu().numpy()
 
 
-class PayoffPredictorRefactored:
+class PayoffPredictor:
     """
     Predicts expected payoff between P1 and P2 policies.
 
@@ -557,7 +578,7 @@ class PayoffPredictorRefactored:
         ])
 
 
-class StatePayoffPredictorRefactored:
+class StatePayoffPredictor:
     """
     Predicts expected payoff for (P1, P2, state) triples.
 
@@ -744,7 +765,7 @@ class StatePayoffPredictorRefactored:
         ])
 
 
-class ExploitabilityPredictorRefactored:
+class ExploitabilityPredictor:
     """
     Predicts exploitability (best response payoff) for policies.
 
@@ -886,3 +907,465 @@ class ExploitabilityPredictorRefactored:
 
         train_y = y[self.trainer.train_indices]
         return self.trainer.evaluate(X, y, indices, train_y)
+
+# Best Response Learner ################################################################
+from open_spiel.python.rl_environment import Environment
+from open_spiel.python.rl_environment import ChanceEventSampler
+from open_spiel.python.vector_env import SyncVectorEnv
+
+from iig_rl_benchmark.algorithms.ppo.ppo import PPO
+
+def make_single_env(game_name, seed, config):
+    def gen_env():
+        game = pyspiel.load_game(game_name)
+        return Environment(game, chance_event_sampler=ChanceEventSampler(seed=seed))
+
+    return gen_env
+
+class BestResponseLearner:
+    def __init__(
+            self,
+            game,
+            policies: list[Policy],
+            embeddings,
+            config,
+            policy_player_id,
+            validation_split: float = 0.2,
+    ):
+        # self.device = get_device_string()
+        self.device = "cpu"
+        self.game = game
+        self.policies = policies
+        if isinstance(embeddings[0], np.ndarray):
+            self.embeddings = torch.tensor(embeddings, dtype=torch.float32, device=self.device)
+        else:
+            self.embeddings = embeddings
+        self.policy_player_id = policy_player_id
+        self.best_responder_player_id = 1 - policy_player_id
+        self.config = config.algorithm
+        self.meta_config = config
+
+        # Create train/val split
+        self.train_indices, self.val_indices = split_data(len(policies), validation_split)
+        self.train_policies = [policies[i] for i in self.train_indices]
+        self.train_embeddings = self.embeddings[self.train_indices]
+        self.val_policies = [policies[i] for i in self.val_indices]
+        self.val_embeddings = self.embeddings[self.val_indices]
+        print(f"BestResponseLearner split: {len(self.train_policies)} train, {len(self.val_policies)} val")
+
+    def train_best_responder(self, optimizer_type="adam", epochs=1, num_steps_per_policy_per_epoch=20, num_trajectories_per_policy_per_epoch=2, experiment_info: ExperimentInfo = None):
+        NUM_ENVS = 1
+        # num_steps_per_batch = 20 # self.config.num_steps # IS THIS USED?
+        info_state_shape = self.game.information_state_tensor_shape()
+        game = self.game
+        # device = get_device_string()
+        device = self.device
+        # best_responder = PPOConditionedOnPolicyRepresentationAgent(
+        #     num_actions=game.num_distinct_actions(),
+        #     observation_shape=info_state_shape,
+        #     device=device,
+        #     num_policies=1, # we don't use the embedding layer, since we already have the embeddings
+        #     policy_embedding_size=self.embeddings[0].shape,
+        # )
+        batch_size = int(NUM_ENVS * num_steps_per_policy_per_epoch)
+        num_updates = self.meta_config.max_steps // batch_size + 1 # THIS IS NOT USED
+        # envs = SyncVectorEnv(
+        #     [
+        #         make_single_env(
+        #             str(self.game),
+        #             self.meta_config.seed + i,
+        #             self.meta_config,
+        #         )()
+        #         for i in range(self.config.num_envs)
+        #     ]
+        # )
+        env = make_single_env(str(self.game), self.meta_config.seed, self.meta_config)()
+        self.agent = PPO(
+            input_shape=info_state_shape,
+            num_actions=game.num_distinct_actions(),
+            num_players=game.num_players(),
+            num_envs=NUM_ENVS,
+            steps_per_batch=num_steps_per_policy_per_epoch,
+            num_minibatches=self.config.num_minibatches,
+            update_epochs=self.config.update_epochs,
+            learning_rate=self.config.learning_rate,
+            gae=self.config.gae,
+            gamma=self.config.gamma,
+            gae_lambda=self.config.gae_lambda,
+            normalize_advantages=self.config.norm_adv,
+            clip_coef=self.config.clip_coef,
+            clip_vloss=self.config.clip_vloss,
+            entropy_coef=self.config.ent_coef,
+            value_coef=self.config.vf_coef,
+            max_grad_norm=self.config.max_grad_norm,
+            target_kl=self.config.target_kl,
+            device=device,
+            agent_fn=PPOConditionedOnPolicyRepresentationAgent,
+            neupl_ppo_policy_embedding=self.embeddings[0], # we'll provide this later
+            neupl_ppo_kwargs={"num_policies": 1, # this doesn't matter because we don't use the embedding layer
+                "policy_embedding_size": self.embeddings[0].shape[0],},
+            use_joint_obs_for_critic=True,
+            optimizer_type=optimizer_type,
+            log_file=os.path.join(self.meta_config.experiment_dir, 'train_log.csv'),
+        )
+        agents = [None, None]
+        agents[self.best_responder_player_id] = SimplePPOWrapper(self.best_responder_player_id, self.agent)
+
+        # Track training metrics
+        trajectory_payoffs = []
+        ppo_metrics_list = []
+
+        for epoch in range(epochs):
+            print(f"Epoch {epoch} of {epochs}")
+            # Add a tqdm progress bar to show progress through policies in the current epoch
+            pbar = tqdm(
+                zip(self.train_policies, self.train_embeddings),
+                total=len(self.train_policies),
+                desc=f"Epoch {epoch+1}/{epochs} Policy Progress",
+            )
+            for policy, embedding in pbar:
+                self.agent.set_policy_embedding(embedding)
+                agents[self.policy_player_id] = PolicyAsAgent(self.policy_player_id, self.game.num_distinct_actions(), np.random.default_rng(), policy)
+                for _ in range(num_trajectories_per_policy_per_epoch):
+                    time_step = env.reset()
+                    cumulative_rewards = 0.0
+                    while not time_step.last():
+                        # self._num_steps += 1
+                        player_id = time_step.observations["current_player"]
+                        # is_evaluation is a boolean that, when False, lets policies train. The
+                        # setting of PSRO requires that all policies be static aside from those
+                        # being trained by the oracle. is_evaluation could be used to prevent
+                        # policies from training, yet we have opted for adding frozen attributes
+                        # that prevents policies from training, for all values of is_evaluation.
+                        # Since all policies returned by the oracle are frozen before being
+                        # returned, only currently-trained policies can effectively learn.
+                        # if isinstance(agents[0]._policy, ppo_wrapper.PPOWrapper) and isinstance(agents[1]._policy, ppo_wrapper.PPOWrapper):
+                        #     pass
+                        # agent_output = agents[player_id].step(
+                        #     time_step, is_evaluation=is_evaluation
+                        # )
+                        is_evaluation = (player_id == self.policy_player_id)
+                        agent_output = agents[player_id].step(time_step, is_evaluation=is_evaluation)
+                        action_list = [agent_output.action]
+                        time_step = env.step(action_list)
+                        cumulative_rewards += np.array(time_step.rewards)
+                        if isinstance(
+                            agents[player_id], SimplePPOWrapper
+                        ):  # self._best_response_kwargs['oracle_type'] == "ppo":
+                            agents[player_id].post_step(time_step, is_evaluation=is_evaluation)
+
+                    # If the last player to act was the non-training PPO agent, then we need to post-step the training PPO agent.
+                    for pid, agent in enumerate(agents):
+                        if isinstance(agent, SimplePPOWrapper):
+                            if pid == 1 - player_id:
+                                assert pid == self.best_responder_player_id
+                                agent.post_step(time_step, is_evaluation=False)
+                        else:
+                            agent.step(time_step)
+
+                    # Track the payoff for this trajectory
+                    trajectory_payoffs.append(cumulative_rewards[self.best_responder_player_id])
+                
+
+                fixed_obs_dict = copy.copy(time_step.observations)
+                fixed_obs_dict["current_player"] = self.best_responder_player_id
+                from open_spiel.python.rl_environment import TimeStep
+                fixed_time_step = TimeStep(
+                    observations=fixed_obs_dict,
+                    rewards=time_step.rewards,
+                    discounts=time_step.discounts,
+                    step_type=time_step.step_type,
+                )
+                metrics = self.agent.learn([fixed_time_step])
+                if metrics is not None:
+                    ppo_metrics_list.append(metrics)
+
+        # Store metrics for later access
+        self.training_metrics = {
+            'trajectory_payoffs': trajectory_payoffs,
+            'ppo_metrics': ppo_metrics_list,
+        }
+
+        # Plot training metrics
+        self._plot_training_metrics(trajectory_payoffs, ppo_metrics_list, window_size=200, experiment_info=experiment_info)
+                # self.agent.learn([time_step])
+                # return cumulative_rewards
+                # update = -1
+                # t0 = time.time()
+                # time_steps = envs.reset()
+                # cp_step = 0
+                # self.agent.total_steps_done = 0
+                # while self.agent.total_steps_done < num_steps_per_policy_per_epoch:
+                #     update += 1
+                #     for _ in range(num_steps_per_batch):
+                #         # Output of current player in each of the envs
+                #         agent_outputs = self.agent.step(time_steps)
+
+                #         # Advance all envs
+                #         time_steps, rewards, dones, unreset_time_steps = envs.step(
+                #             agent_outputs, reset_if_done=True
+                #         )
+                #         self.agent.post_step([reward[0] for reward in rewards], dones)
+                #     if self.config.anneal_lr:
+                #         self.agent.anneal_learning_rate(update, num_updates)
+                #     self.agent.learn(time_steps)
+
+                #     if self.agent.total_steps_done > cp_step + self.meta_config.compute_exploitability_every:
+                #         cp_step = cp_step + self.meta_config.compute_exploitability_every
+                #         if self.expl_callback is not None:
+                #             self.expl_callback(
+                #                 self.get_model(), self.get_model(), self.agent.total_steps_done
+                #             )
+                #         self.agent.save(f"{self.meta_config.experiment_dir}/agent.pth")
+
+                #     if update % self.config.eval_every == 0:
+                #         time_elapsed = time.time() - t0
+                #         time_remaining_est = (
+                #             # (self.meta_config.max_steps - self.agent.total_steps_done)
+                #             (num_steps_per_policy_per_epoch - self.agent.total_steps_done)
+                #             * time_elapsed
+                #             / self.agent.total_steps_done
+                #         )
+                #         # print(f"step {self.agent.total_steps_done}/{self.meta_config.max_steps} ; elapsed: {time_elapsed/60:.1f}min ; remaining: {time_remaining_est/60:.1f}min")
+                #         # print(f"step {self.agent.total_steps_done}/{num_steps_per_policy_per_epoch} ; elapsed: {time_elapsed/60:.1f}min ; remaining: {time_remaining_est/60:.1f}min")
+                #         # pbar.set_postfix(elapsed=f"{time_elapsed/60:.1f}min", remaining=f"{time_remaining_est/60:.1f}min")
+                #         pbar.set_description(f"step {self.agent.total_steps_done}/{num_steps_per_policy_per_epoch} ; elapsed: {time_elapsed/60:.1f}min ; remaining: {time_remaining_est/60:.1f}min")
+
+    def _plot_training_metrics(self, trajectory_payoffs: list, ppo_metrics: list, window_size: int = 100, experiment_info: ExperimentInfo = None):
+        """
+        Plot training metrics with moving average.
+
+        Args:
+            trajectory_payoffs: List of payoffs from each trajectory
+            ppo_metrics: List of dicts with PPO training metrics (value_loss, policy_loss, etc.)
+            window_size: Window size for moving average
+            experiment_info: Experiment info for labeling the plot
+        """
+        if len(trajectory_payoffs) == 0:
+            print("No training data to plot")
+            return
+
+        payoffs = np.array(trajectory_payoffs)
+
+        # Compute moving average helper
+        def compute_moving_avg(data, window):
+            actual_window = min(window, len(data))
+            if actual_window == 0:
+                return np.array([]), np.array([])
+            moving_avg = np.convolve(data, np.ones(actual_window) / actual_window, mode='valid')
+            ma_x = np.arange(actual_window - 1, actual_window - 1 + len(moving_avg))
+            return ma_x, moving_avg
+
+        # Create 3x2 subplot figure
+        fig, axes = plt.subplots(3, 2, figsize=(14, 15))
+
+        # Row 0, Col 0: Trajectory payoffs
+        ax = axes[0, 0]
+        ax.plot(payoffs, alpha=0.3, color='blue', label='Raw payoffs')
+        ma_x, moving_avg = compute_moving_avg(payoffs, window_size)
+        if len(moving_avg) > 0:
+            ax.plot(ma_x, moving_avg, color='red', linewidth=2, label=f'Moving avg (window={min(window_size, len(payoffs))})')
+        ax.set_xlabel('Trajectory')
+        ax.set_ylabel('Payoff')
+        ax.set_title('Trajectory Payoffs')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        # Extract PPO metrics if available
+        if len(ppo_metrics) > 0:
+            value_losses = np.array([m['value_loss'] for m in ppo_metrics])
+            explained_variances = np.array([m['explained_variance'] for m in ppo_metrics])
+            entropies = np.array([m['entropy'] for m in ppo_metrics])
+            grad_norms = np.array([m.get('grad_norm', 0) for m in ppo_metrics])
+
+            # Debug: print explained variance stats
+            print(f"Explained Variance stats: min={np.min(explained_variances):.4f}, max={np.max(explained_variances):.4f}, "
+                  f"mean={np.mean(explained_variances):.4f}, median={np.median(explained_variances):.4f}")
+            print(f"Explained Variance first 10: {explained_variances[:10]}")
+            print(f"Explained Variance last 10: {explained_variances[-10:]}")
+
+            # Top-right: Value loss
+            ax = axes[0, 1]
+            ax.plot(value_losses, alpha=0.3, color='orange', label='Raw')
+            ma_x, moving_avg = compute_moving_avg(value_losses, window_size)
+            if len(moving_avg) > 0:
+                ax.plot(ma_x, moving_avg, color='red', linewidth=2, label='Moving avg')
+            ax.set_xlabel('Update')
+            ax.set_ylabel('Value Loss')
+            ax.set_title('Value Loss (should decrease)')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+            # Bottom-left: Explained variance
+            ax = axes[1, 0]
+            ax.plot(explained_variances, alpha=0.3, color='green', label='Raw')
+            ma_x, moving_avg = compute_moving_avg(explained_variances, window_size)
+            if len(moving_avg) > 0:
+                ax.plot(ma_x, moving_avg, color='red', linewidth=2, label='Moving avg')
+            ax.set_xlabel('Update')
+            ax.set_ylabel('Explained Variance')
+            ax.set_title('Explained Variance (should approach 1.0)')
+            ax.axhline(y=1.0, color='gray', linestyle='--', alpha=0.5)
+            ax.set_ylim(-1, 1)
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+            # Row 1, Col 1: Entropy
+            ax = axes[1, 1]
+            ax.plot(entropies, alpha=0.3, color='purple', label='Raw')
+            ma_x, moving_avg = compute_moving_avg(entropies, window_size)
+            if len(moving_avg) > 0:
+                ax.plot(ma_x, moving_avg, color='red', linewidth=2, label='Moving avg')
+            ax.set_xlabel('Update')
+            ax.set_ylabel('Entropy')
+            ax.set_title('Policy Entropy (should not collapse to 0)')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+            # Row 2, Col 0: Gradient Norm
+            ax = axes[2, 0]
+            ax.plot(grad_norms, alpha=0.3, color='brown', label='Raw')
+            ma_x, moving_avg = compute_moving_avg(grad_norms, window_size)
+            if len(moving_avg) > 0:
+                ax.plot(ma_x, moving_avg, color='red', linewidth=2, label='Moving avg')
+            ax.set_xlabel('Update')
+            ax.set_ylabel('Gradient Norm')
+            ax.set_title('Gradient Norm (before clipping)')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+            # Row 2, Col 1: Empty or future use
+            axes[2, 1].set_axis_off()
+        else:
+            # No PPO metrics - add text to remaining subplots
+            for ax in [axes[0, 1], axes[1, 0], axes[1, 1], axes[2, 0], axes[2, 1]]:
+                ax.text(0.5, 0.5, 'No PPO metrics available',
+                       ha='center', va='center', transform=ax.transAxes)
+                ax.set_axis_off()
+
+        # Add experiment label as title at top of figure
+        if experiment_info:
+            fig.suptitle(experiment_info.label_string, fontsize=14, fontweight='bold')
+
+        plt.tight_layout()
+
+        # Save plot to results/training_metrics with unique filename
+        from datetime import datetime
+        metrics_dir = os.path.join('results', 'training_metrics')
+        os.makedirs(metrics_dir, exist_ok=True)
+        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        random_suffix = random.randint(10, 99)
+        filename = f'tm_{timestamp}_{random_suffix}.png'
+        plot_path = os.path.join(metrics_dir, filename)
+        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+        print(f"Training plot saved to {plot_path}")
+        plt.close(fig)
+
+    def evaluate(self, eval_set: str = "val", num_episodes_per_policy: int = 200):
+        """
+        Evaluate the trained best-responder on the specified set.
+
+        Args:
+            eval_set: Which set to evaluate on ('val' or 'train')
+            num_episodes_per_policy: Number of episodes to run per policy for empirical evaluation
+
+        Returns:
+            dict with empirical_payoffs, exact_exploitabilities, and averages
+        """
+        if eval_set == "val":
+            policies = self.val_policies
+            embeddings = self.val_embeddings
+        elif eval_set == "train":
+            policies = self.train_policies
+            embeddings = self.train_embeddings
+        else:
+            raise ValueError(f"Invalid eval_set: {eval_set}. Must be 'val' or 'train'")
+
+        # Empirically run the trained best-responder against the policies in the validation set
+        # collect the empirical payoffs for each trajectory against each policy, and the average payoff against each policy,
+        # and the average payoff against all policies.
+        empirical_payoffs_per_policy = []
+        empirical_payoffs_all_trajectories = []
+
+        # best_responder_player_id = 0  # The best-responder plays as player 0
+
+        for policy, embedding in tqdm(zip(policies, embeddings), total=len(policies), desc="Empirical evaluation"):
+            # Set the embedding for the best-responder
+            self.agent.set_policy_embedding(embedding)
+
+            # Create a policy wrapper for the trained best-responder
+            br_policy = PPONeuplAgentPolicy(
+                self.game,
+                self.agent.network,  # Access the underlying PPOConditionedOnPolicyRepresentationAgent
+                self.best_responder_player_id,
+                use_observation=False,
+                embedding=embedding
+            )
+
+            # Run episodes and collect payoffs
+            episode_payoffs = []
+            policies_to_sample = [None, None]
+            policies_to_sample[self.best_responder_player_id] = br_policy
+            policies_to_sample[self.policy_player_id] = policy
+            for _ in range(num_episodes_per_policy):
+                payoff = sample_episode(self.game.new_initial_state(), policies_to_sample)[self.best_responder_player_id]
+                episode_payoffs.append(payoff)
+
+            avg_payoff = np.mean(episode_payoffs)
+            empirical_payoffs_per_policy.append(avg_payoff)
+            empirical_payoffs_all_trajectories.extend(episode_payoffs)
+
+        avg_empirical_payoff = np.mean(empirical_payoffs_per_policy)
+
+        # Compute exact exploitability against each policy in the validation set, and the average exact exploitability for all policies
+        exact_exploitabilities = []
+        # best_responder_id = 0  # We compute best response value for player 0
+
+        # Compute all states and info states (needed for tabular best response)
+        all_states, state_to_information_state = psro_utils.compute_states_and_info_states_if_none(
+            self.game, None, None
+        )
+
+        # Create dummy policy for initializing best response processor
+        dummy_policy = UniformRandomPolicy(self.game)
+        policy_to_dict = policy_utils.policy_to_dict(
+            dummy_policy, self.game, all_states, state_to_information_state
+        )
+
+        # Create best response processor
+        best_response_processor = TabularBestResponse(
+            self.game, self.best_responder_player_id, policy_to_dict
+        )
+
+        initial_state = self.game.new_initial_state()
+
+        for policy in tqdm(policies, desc="Computing exact exploitabilities"):
+            # Set the policy we're computing exploitability against
+            best_response_processor.set_policy(
+                policy_utils.policy_to_dict(
+                    policy, self.game, all_states, state_to_information_state
+                )
+            )
+            # Compute best response policy and its value
+            br = best_response.CPPBestResponsePolicy(
+                self.game, self.best_responder_player_id, policy, all_states,
+                state_to_information_state, best_response_processor
+            )
+            exact_value = br.value(initial_state)
+            exact_exploitabilities.append(exact_value)
+
+        avg_exact_exploitability = np.mean(exact_exploitabilities)
+
+        results = {
+            'empirical_payoffs_per_policy': empirical_payoffs_per_policy,
+            'empirical_payoffs_all_trajectories': empirical_payoffs_all_trajectories,
+            'avg_empirical_payoff': avg_empirical_payoff,
+            'exact_exploitabilities': exact_exploitabilities,
+            'avg_exact_exploitability': avg_exact_exploitability,
+            'num_policies': len(policies),
+        }
+        print(results['avg_empirical_payoff'])
+        print(results['avg_exact_exploitability'])
+        return results
+
+
