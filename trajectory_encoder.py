@@ -510,6 +510,7 @@ class TrajectoryEncoderConfig:
 
     # Training
     num_transitions: int = 200
+    trajectories_per_policy: int = 50
     batch_size: int = 8
     epochs: int = 50
     lr: float = 1e-4
@@ -601,6 +602,7 @@ class TrajectoryEncoderTrainer:
             num_transitions=config.num_transitions,
             normalize=config.normalize,
             device=config.device,
+            trajectories_per_policy=config.trajectories_per_policy,
         )
 
         self.train_dataloader = DataLoader(
@@ -618,6 +620,7 @@ class TrajectoryEncoderTrainer:
                 num_transitions=config.num_transitions,
                 normalize=config.normalize,
                 device=config.device,
+                trajectories_per_policy=config.trajectories_per_policy,
             )
             self.val_dataloader = DataLoader(
                 self.val_dataset,
@@ -860,6 +863,7 @@ def parse_args() -> argparse.Namespace:
 
     # Training
     parser.add_argument("--num-transitions", type=int, default=200, help="Transitions per trajectory")
+    parser.add_argument("--trajectories-per-policy", type=int, default=50, help="Trajectories per policy for contrastive training")
     parser.add_argument("--batch-size", type=int, default=8, help="Batch size")
     parser.add_argument("--epochs", type=int, default=50, help="Training epochs")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
@@ -874,6 +878,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ppo-hidden-size", type=int, default=256, help="Hidden size for PPO agents")
     parser.add_argument("--normalize", action="store_true", help="Normalize states and rewards")
     parser.add_argument("--shuffle-psro", action="store_true", help="Shuffle PSRO agents before using them")
+    parser.add_argument("--agent-pool", type=str, default=None, help="Path to saved agent pool (uses pretrain agents for training)")
 
     # System
     parser.add_argument("--game", type=str, default="kuhn_poker", help="OpenSpiel game name")
@@ -904,7 +909,12 @@ if __name__ == "__main__":
     print(f"Action dimension: {num_actions}")
 
     # Create or load PPO agents
-    if args.use_psro:
+    if args.agent_pool:
+        from generate_agents import load_agents
+        print(f"\nLoading pretrain agents from {args.agent_pool}...")
+        ppo_agents, _ = load_agents(args.agent_pool, game)
+        print(f"Loaded {len(ppo_agents)} pretrain agents")
+    elif args.use_psro:
         print(f"\nLoading PSRO agents (hidden_size={args.ppo_hidden_size})...")
         ppo_agents = load_ppo_agents_from_psro(game_short_name=args.game, hidden_size=args.ppo_hidden_size, shuffle=args.shuffle_psro, player_id=0)
         print(f"Loaded {len(ppo_agents)} PSRO agents")
@@ -928,6 +938,7 @@ if __name__ == "__main__":
         num_heads=args.num_heads,
         dropout=args.dropout,
         num_transitions=args.num_transitions,
+        trajectories_per_policy=args.trajectories_per_policy,
         batch_size=args.batch_size,
         epochs=args.epochs,
         lr=args.lr,
