@@ -17,6 +17,28 @@ from typing import Literal, Optional
 
 
 @dataclass
+class ExperimentInfo:
+    """
+    Information about an experiment, used for labeling and tracking.
+
+    Attributes:
+        _label_string: The human-readable label for this experiment
+        embedding_type: The type of embedding used (e.g., 'identity', 'weight_autoencoder', 'functional_encoder')
+    """
+    _label_string: str
+    embedding_type: str
+
+    @property
+    def label_string(self) -> str:
+        """Return the experiment label string."""
+        return self._label_string
+
+    def __str__(self) -> str:
+        """Return the label string when converted to string."""
+        return self._label_string
+
+
+@dataclass
 class ModelConfig:
     """
     Configuration for predictor models (neural networks or random forest).
@@ -26,13 +48,14 @@ class ModelConfig:
     - linear: Linear regression (no hidden layers)
     - random_forest: scikit-learn RandomForestRegressor
     """
-    model_type: Literal["mlp", "linear", "random_forest"] = "mlp"
+    model_type: Optional[Literal["mlp", "linear", "random_forest"]] = None
     hidden_dims: Optional[list[int]] = None  # Auto-set based on model_type in __post_init__
     dropout: float = 0.0
     learning_rate: float = 1e-4
     num_epochs: int = 5000
     batch_size: int = 16
     early_stopping_patience: int = 50
+    optimizer_type: Literal["adam", "adamw"] = "adam"
 
     def __post_init__(self):
         """Set default hidden_dims based on model_type if not explicitly provided."""
@@ -127,6 +150,28 @@ class TaskDConfig:
         if not 0 < self.validation_split < 1:
             raise ValueError(f"validation_split must be in (0, 1), got {self.validation_split}")
 
+@dataclass
+class TaskEConfig:
+    """
+    Configuration for Task E: Best response learner.
+    """
+    model_config: ModelConfig = field(default_factory=ModelConfig)
+    player_id: int = 0  # Which player perspective to evaluate exploitability from
+    validation_split: float = 0.2
+    num_steps_per_policy_per_epoch: int = 20
+    num_trajectories_per_policy_per_epoch: int = 2
+    epochs: int = 5
+    compare_to_control: bool = False  # If True, also train/eval with shuffled embeddings as control
+
+    def __post_init__(self):
+        if self.player_id not in [0, 1]:
+            raise ValueError(f"player_id must be 0 or 1, got {self.player_id}")
+        if not 0 < self.validation_split < 1:
+            raise ValueError(f"validation_split must be in (0, 1), got {self.validation_split}")
+        if self.num_steps_per_policy_per_epoch < 1:
+            raise ValueError(f"num_steps_per_policy_per_epoch must be >= 1, got {self.num_steps_per_policy_per_epoch}")
+        if self.epochs < 1:
+            raise ValueError(f"epochs must be >= 1, got {self.epochs}")
 
 def config_to_dict(config) -> dict:
     """

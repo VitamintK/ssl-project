@@ -17,18 +17,19 @@ Benefits:
 import numpy as np
 import logging
 from typing import List
+from omegaconf import OmegaConf
 from open_spiel.python.policy import Policy, UniformRandomPolicy
 
-from config import TaskAConfig, TaskBConfig, TaskCConfig, TaskDConfig, config_to_dict
+from config import TaskAConfig, TaskBConfig, TaskCConfig, TaskDConfig, TaskEConfig, ExperimentInfo, config_to_dict
 from downstream import (
-    PayoffPredictorRefactored,
-    StatePayoffPredictorRefactored,
-    ExploitabilityPredictorRefactored
+    BestResponseLearner,
+    PayoffPredictor,
+    StatePayoffPredictor,
+    ExploitabilityPredictor
 )
 
 
-# Use the existing logger from main.py
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("ssl_project")
 
 
 def run_task_a(
@@ -36,7 +37,7 @@ def run_task_a(
     policies: List[Policy],
     embeddings: List[np.ndarray],
     config: TaskAConfig,
-    exp_label: str,
+    experiment_info: ExperimentInfo,
     device: str = "cpu"
 ) -> dict:
     """
@@ -47,7 +48,7 @@ def run_task_a(
         policies: Pre-generated P1 policies
         embeddings: Pre-computed P1 embeddings
         config: Task A configuration (model type, validation split, etc.)
-        exp_label: Experiment label for result registration
+        experiment_info: Experiment info for labeling and result registration
         device: Device for computation
 
     Returns:
@@ -69,7 +70,7 @@ def run_task_a(
     """
     game_short_name = game.get_type().short_name
 
-    logger.info(f"Running Task A: {exp_label}")
+    logger.info(f"Running Task A: {experiment_info.label_string}")
     logger.info(f"Model type: {config.model_config.model_type}")
     logger.info(f"Number of policies: {len(policies)}")
     logger.info(f"Embedding dimension: {embeddings[0].shape[0] if len(embeddings) > 0 else 'N/A'}")
@@ -78,7 +79,7 @@ def run_task_a(
     opponent_policy = UniformRandomPolicy(game)
 
     # Create predictor
-    predictor = PayoffPredictorRefactored(
+    predictor = PayoffPredictor(
         game=game,
         p1_policies=policies,
         p2_policies=[opponent_policy],
@@ -102,28 +103,17 @@ def run_task_a(
     train_metrics = predictor.evaluate(eval_set="train")
 
     # Log results
-    logger.info(f"Results for {exp_label}:")
+    logger.info(f"Results for {experiment_info.label_string}:")
     logger.info(f"  Validation MSE: {val_metrics['mse']:.6f}")
     logger.info(f"  Baseline MSE: {val_metrics['baseline_mse']:.6f}")
     improvement = (1 - val_metrics['mse'] / val_metrics['baseline_mse']) * 100
     logger.info(f"  Improvement over baseline: {improvement:.2f}%")
     logger.info(f"  Training MSE: {train_metrics['mse']:.6f}")
 
-    # ALWAYS register results (fixes inconsistent result tracking)
-    from main import register_result  # Import here to avoid circular dependency
-    register_result(
-        experiment_label=exp_label,
-        config_dict=config_to_dict(config),
-        mse=val_metrics['mse'],
-        baseline_mse=val_metrics['baseline_mse']
-    )
-
     return {
-        'predictor': predictor,
-        'history': history,
         'val_metrics': val_metrics,
         'train_metrics': train_metrics,
-        'config': config
+        'config': config_to_dict(config),
     }
 
 
@@ -134,7 +124,7 @@ def run_task_b(
     p2_policies: List[Policy],
     p2_embeddings: List[np.ndarray],
     config: TaskBConfig,
-    exp_label: str,
+    experiment_info: ExperimentInfo,
     device: str = "cpu"
 ) -> dict:
     """
@@ -150,7 +140,7 @@ def run_task_b(
         p2_policies: Pre-generated P2 policies
         p2_embeddings: Pre-computed P2 embeddings
         config: Task B configuration (model type, validation split, etc.)
-        exp_label: Experiment label for result registration
+        experiment_info: Experiment info for labeling and result registration
         device: Device for computation
 
     Returns:
@@ -171,7 +161,7 @@ def run_task_b(
         ...                      config, "exp1", "cpu")
         >>> print(f"Val MSE: {results['val_metrics']['mse']:.6f}")
     """
-    logger.info(f"Running Task B: {exp_label}")
+    logger.info(f"Running Task B: {experiment_info.label_string}")
     logger.info(f"Model type: {config.model_config.model_type}")
     logger.info(f"Number of P1 policies: {len(p1_policies)}")
     logger.info(f"Number of P2 policies: {len(p2_policies)}")
@@ -179,7 +169,7 @@ def run_task_b(
     logger.info(f"P2 embedding dimension: {p2_embeddings[0].shape[0] if len(p2_embeddings) > 0 else 'N/A'}")
 
     # Create predictor
-    predictor = PayoffPredictorRefactored(
+    predictor = PayoffPredictor(
         game=game,
         p1_policies=p1_policies,
         p2_policies=p2_policies,
@@ -203,28 +193,17 @@ def run_task_b(
     train_metrics = predictor.evaluate(eval_set="train")
 
     # Log results
-    logger.info(f"Results for {exp_label}:")
+    logger.info(f"Results for {experiment_info.label_string}:")
     logger.info(f"  Validation MSE: {val_metrics['mse']:.6f}")
     logger.info(f"  Baseline MSE: {val_metrics['baseline_mse']:.6f}")
     improvement = (1 - val_metrics['mse'] / val_metrics['baseline_mse']) * 100
     logger.info(f"  Improvement over baseline: {improvement:.2f}%")
     logger.info(f"  Training MSE: {train_metrics['mse']:.6f}")
 
-    # ALWAYS register results
-    from main import register_result
-    register_result(
-        experiment_label=exp_label,
-        config_dict=config_to_dict(config),
-        mse=val_metrics['mse'],
-        baseline_mse=val_metrics['baseline_mse']
-    )
-
     return {
-        'predictor': predictor,
-        'history': history,
         'val_metrics': val_metrics,
         'train_metrics': train_metrics,
-        'config': config
+        'config': config_to_dict(config),
     }
 
 
@@ -235,7 +214,7 @@ def run_task_c(
     p2_policies: List[Policy],
     p2_embeddings: List[np.ndarray],
     config: TaskCConfig,
-    exp_label: str,
+    experiment_info: ExperimentInfo,
     device: str = "cpu"
 ) -> dict:
     """
@@ -251,7 +230,7 @@ def run_task_c(
         p2_policies: Pre-generated P2 policies
         p2_embeddings: Pre-computed P2 embeddings
         config: Task C configuration (model type, validation split, num_states, etc.)
-        exp_label: Experiment label for result registration
+        experiment_info: Experiment info for labeling and result registration
         device: Device for computation
 
     Returns:
@@ -274,7 +253,7 @@ def run_task_c(
         ...                      config, "exp1", "cpu")
         >>> print(f"Val MSE: {results['val_metrics']['mse']:.6f}")
     """
-    logger.info(f"Running Task C: {exp_label}")
+    logger.info(f"Running Task C: {experiment_info.label_string}")
     logger.info(f"Model type: {config.model_config.model_type}")
     logger.info(f"Number of P1 policies: {len(p1_policies)}")
     logger.info(f"Number of P2 policies: {len(p2_policies)}")
@@ -282,7 +261,7 @@ def run_task_c(
     logger.info(f"Max state depth: {config.max_state_depth}")
 
     # Create predictor
-    predictor = StatePayoffPredictorRefactored(
+    predictor = StatePayoffPredictor(
         game=game,
         p1_policies=p1_policies,
         p2_policies=p2_policies,
@@ -308,28 +287,17 @@ def run_task_c(
     train_metrics = predictor.evaluate(eval_set="train")
 
     # Log results
-    logger.info(f"Results for {exp_label}:")
+    logger.info(f"Results for {experiment_info.label_string}:")
     logger.info(f"  Validation MSE: {val_metrics['mse']:.6f}")
     logger.info(f"  Baseline MSE: {val_metrics['baseline_mse']:.6f}")
     improvement = (1 - val_metrics['mse'] / val_metrics['baseline_mse']) * 100
     logger.info(f"  Improvement over baseline: {improvement:.2f}%")
     logger.info(f"  Training MSE: {train_metrics['mse']:.6f}")
 
-    # ALWAYS register results
-    from main import register_result
-    register_result(
-        experiment_label=exp_label,
-        config_dict=config_to_dict(config),
-        mse=val_metrics['mse'],
-        baseline_mse=val_metrics['baseline_mse']
-    )
-
     return {
-        'predictor': predictor,
-        'history': history,
         'val_metrics': val_metrics,
         'train_metrics': train_metrics,
-        'config': config
+        'config': config_to_dict(config),
     }
 
 
@@ -338,7 +306,7 @@ def run_task_d(
     policies: List[Policy],
     embeddings: List[np.ndarray],
     config: TaskDConfig,
-    exp_label: str,
+    experiment_info: ExperimentInfo,
     device: str = "cpu"
 ) -> dict:
     """
@@ -352,7 +320,7 @@ def run_task_d(
         policies: Pre-generated policies
         embeddings: Pre-computed embeddings
         config: Task D configuration (model type, validation split, player_id, etc.)
-        exp_label: Experiment label for result registration
+        experiment_info: Experiment info for labeling and result registration
         device: Device for computation
 
     Returns:
@@ -373,14 +341,14 @@ def run_task_d(
         >>> results = run_task_d(game, policies, embeddings, config, "exp1", "cpu")
         >>> print(f"Val MSE: {results['val_metrics']['mse']:.6f}")
     """
-    logger.info(f"Running Task D: {exp_label}")
+    logger.info(f"Running Task D: {experiment_info.label_string}")
     logger.info(f"Model type: {config.model_config.model_type}")
     logger.info(f"Number of policies: {len(policies)}")
     logger.info(f"Player ID: {config.player_id}")
     logger.info(f"Embedding dimension: {embeddings[0].shape[0] if len(embeddings) > 0 else 'N/A'}")
 
     # Create predictor
-    predictor = ExploitabilityPredictorRefactored(
+    predictor = ExploitabilityPredictor(
         game=game,
         policies=policies,
         embeddings=embeddings,
@@ -403,26 +371,105 @@ def run_task_d(
     train_metrics = predictor.evaluate(eval_set="train")
 
     # Log results
-    logger.info(f"Results for {exp_label}:")
+    logger.info(f"Results for {experiment_info.label_string}:")
     logger.info(f"  Validation MSE: {val_metrics['mse']:.6f}")
     logger.info(f"  Baseline MSE: {val_metrics['baseline_mse']:.6f}")
     improvement = (1 - val_metrics['mse'] / val_metrics['baseline_mse']) * 100
     logger.info(f"  Improvement over baseline: {improvement:.2f}%")
     logger.info(f"  Training MSE: {train_metrics['mse']:.6f}")
 
-    # ALWAYS register results
-    from main import register_result
-    register_result(
-        experiment_label=exp_label,
-        config_dict=config_to_dict(config),
-        mse=val_metrics['mse'],
-        baseline_mse=val_metrics['baseline_mse']
-    )
-
     return {
-        'predictor': predictor,
-        'history': history,
         'val_metrics': val_metrics,
         'train_metrics': train_metrics,
-        'config': config
+        'config': config_to_dict(config),
     }
+
+def run_task_e(
+    game,
+    policies: List[Policy],
+    embeddings: List[np.ndarray],
+    config: TaskEConfig,
+    experiment_info: ExperimentInfo,
+    device: str = "cpu"
+) -> dict:
+    logger.info(f"Running Task E: {experiment_info.label_string}")
+    logger.info(f"Model type: {config.model_config.model_type}")
+    logger.info(f"Number of policies: {len(policies)}")
+    logger.info(f"Player ID: {config.player_id}")
+    logger.info(f"Embedding dimension: {embeddings[0].shape[0] if len(embeddings) > 0 else 'N/A'}")
+    EVAL_SET = 'val'
+
+    # Create predictor
+    # TODO: actually use hydra or don't
+    config_path = 'configs/ppo_kuhn_poker.yaml'
+    algorithm_config = OmegaConf.load(config_path)
+    args = OmegaConf.load('configs/experiment.yaml')
+    args.algorithm = algorithm_config
+    # policies, embeddings = policies[:3], embeddings[:3]
+    predictor = BestResponseLearner(
+        game=game,
+        policies=policies,
+        embeddings=embeddings,
+        policy_player_id=config.player_id,
+        config=args,
+    )
+
+    predictor.train_best_responder(
+        optimizer_type=config.model_config.optimizer_type,
+        epochs=config.epochs,
+        num_steps_per_policy_per_epoch=config.num_steps_per_policy_per_epoch,
+        num_trajectories_per_policy_per_epoch=config.num_trajectories_per_policy_per_epoch,
+        experiment_info=experiment_info,
+    )
+
+    # Evaluate
+    logger.info("Evaluating on validation set...")
+    predictor_metrics = predictor.evaluate(eval_set=EVAL_SET, num_episodes_per_policy=400)
+
+    # result = {
+    #     'predictor': predictor,
+    #     'predictor_metrics': predictor_metrics,
+    #     'config': config,
+    # }
+
+    # Control comparison: train with shuffled embeddings
+    if config.compare_to_control:
+        logger.info("Running control comparison with shuffled embeddings...")
+
+        # Shuffle embeddings (break the correspondence between policies and embeddings)
+        # shuffled_indices = np.random.permutation(len(embeddings))
+        # shuffled_embeddings = [embeddings[i] for i in shuffled_indices]
+
+        # control_predictor = BestResponseLearner(
+        #     game=game,
+        #     policies=policies,
+        #     embeddings=shuffled_embeddings,
+        #     policy_player_id=config.player_id,
+        #     config=args,
+        # )
+        # a bit ad hoc but it's ok!
+        predictor.val_embeddings = predictor.val_embeddings[np.random.permutation(len(predictor.val_embeddings))]
+        predictor.train_embeddings = predictor.train_embeddings[np.random.permutation(len(predictor.train_embeddings))]
+
+        predictor.train_best_responder(
+            epochs=config.epochs,
+            num_steps_per_policy_per_epoch=config.num_steps_per_policy_per_epoch,
+            num_trajectories_per_policy_per_epoch=config.num_trajectories_per_policy_per_epoch,
+            experiment_info=experiment_info,
+        )
+
+        logger.info("Evaluating control (shuffled embeddings) on validation set...")
+        control_metrics = predictor.evaluate(eval_set=EVAL_SET, num_episodes_per_policy=500)
+
+        logger.info(f"Control comparison results:")
+        logger.info(f"  Original avg empirical payoff: {predictor_metrics['avg_empirical_payoff']:.4f}")
+        logger.info(f"  Control avg empirical payoff:  {control_metrics['avg_empirical_payoff']:.4f}")
+        logger.info(f"  Original avg exact exploitability: {predictor_metrics['avg_exact_exploitability']:.4f}")
+        logger.info(f"  Control avg exact exploitability:  {control_metrics['avg_exact_exploitability']:.4f}")
+    result = {
+        'val_metrics': predictor_metrics,
+        'config': config_to_dict(config),
+    }
+    if config.compare_to_control:
+        result['control_metrics'] = control_metrics
+    return result

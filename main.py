@@ -1,6 +1,8 @@
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import math
+import os
 import random
 from typing import Literal, Optional
 import pyspiel
@@ -11,14 +13,15 @@ from datetime import datetime
 
 from open_spiel.python import policy as policy_lib
 from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
-from psro import load_ppo_agents_from_psro, make_neupl_policies
+from psro import load_ppo_agents_from_psro, make_neupl_policies, select_neupl_directory
 from utils import PPOAgentPolicy, get_device_string, make_diverse_random_kuhn_poker_layer_init
 from functional_autoencoder import (
     TrainingConfig,
     train_functional_autoencoder,
     FunctionalEncoderAdapter,
 )
-from downstream_deprecated import ExploitabilityPredictorTrainer, PayoffPredictor, StatePayoffPredictor, set_seed, sample_random_states
+# from downstream_deprecated import ExploitabilityPredictorTrainer, PayoffPredictor, StatePayoffPredictor, set_seed, sample_random_states
+from downstream import PayoffPredictor, StatePayoffPredictor, ExploitabilityPredictor, sample_random_states
 from weight_autoencoder import (
     AutoencoderConfig,
     WeightAutoencoder,
@@ -26,65 +29,58 @@ from weight_autoencoder import (
     save_autoencoder,
     load_autoencoder,
 )
-from tasks import run_task_a, run_task_d
-from config import TaskAConfig, TaskDConfig, ModelConfig
+from tasks import run_task_a, run_task_d, run_task_e
+from config import TaskAConfig, TaskDConfig, ModelConfig, TaskEConfig, ExperimentInfo
+from tqdm import tqdm
 
 results = {'run': []}
 run_start_time = None
 
 
-def register_result(experiment_label: str, config_dict: dict, mse, baseline_mse):
-    """
-    Register a result for an experiment.
+def _strip_arrays(result: dict) -> dict:
+    """Remove list-valued entries from metrics dicts to keep the JSON small."""
+    out = {}
+    for k, v in result.items():
+        if isinstance(v, dict):
+            out[k] = {mk: mv for mk, mv in v.items() if not isinstance(mv, list)}
+        else:
+            out[k] = v
+    return out
 
-    Args:
-        experiment_label: String label for the experiment
-        config_dict: Dictionary with config parameters (prefixed for method-specific params)
-        mse: Mean squared error
-        baseline_mse: Baseline mean squared error
-    """
-    # Convert tensors to floats
-    if hasattr(mse, "item"):
-        mse = mse.item()
-    if hasattr(baseline_mse, "item"):
-        baseline_mse = baseline_mse.item()
 
-    # Find existing run with same experiment_label
-    existing_run = None
-    for run in results['run']:
-        if run['experiment_label'] == experiment_label:
-            existing_run = run
-            break
-
-    if existing_run:
-        # Append to existing results
-        existing_run['results'].append({
-            'mse': mse,
-            'baseline_mse': baseline_mse
-        })
+def register_result(experiment_label: str, result: dict, save: bool = True):
+    existing = next((r for r in results['run'] if r['experiment_label'] == experiment_label), None)
+    stripped = _strip_arrays(result)
+    if existing:
+        existing['results'].append(stripped)
     else:
-        # Create new run entry
-        results['run'].append({
-            'experiment_label': experiment_label,
-            'config': config_dict,
-            'results': [{
-                'mse': mse,
-                'baseline_mse': baseline_mse
-            }]
-        })
+        results['run'].append({'experiment_label': experiment_label, 'results': [stripped]})
+
+    if save:
+        save_results()
 
 
 def save_results():
     """Save results to both main file and timestamped archive."""
     # Print summary
-    for run in results['run']:
-        print(run['experiment_label'])
-        for result in run['results']:
-            print(f"{result['mse']:.6f},{result['baseline_mse']:.6f}")
+    # for run in results['run']:
+    #     print(run['experiment_label'])
+    #     for result in run['results']:
+    #         print(f"{result['mse']:.6f},{result['baseline_mse']:.6f}")
+
+    class _NumpyEncoder(json.JSONEncoder):
+        def default(self, obj):
+            if isinstance(obj, np.integer):
+                return int(obj)
+            if isinstance(obj, np.floating):
+                return float(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return super().default(obj)
 
     # Save to main file
     with open('results/all_downstream_tasks.json', 'w') as f:
-        json.dump(results, f, indent=2)
+        json.dump(results, f, indent=2, cls=_NumpyEncoder)
 
     # Save to archive with timestamp
     archive_dir = Path("results/archive")
@@ -94,21 +90,14 @@ def save_results():
     archive_path = archive_dir / f"downstream_results_{timestamp}.json"
 
     with open(archive_path, 'w') as f:
-        json.dump(results, f, indent=2)
+        json.dump(results, f, indent=2, cls=_NumpyEncoder)
 
     print(f"\nResults saved to:")
     print(f"  - results/all_downstream_tasks.json")
     print(f"  - {archive_path}")
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("ssl_project")
 logger.setLevel(logging.INFO)
-Path("logs").mkdir(parents=True, exist_ok=True)
-handler = logging.FileHandler('logs/all_downstream_tasks.log', mode='w')
-handler.setFormatter(logging.Formatter('%(message)s'))
-logger.addHandler(handler)
-handler = logging.StreamHandler()
-handler.setFormatter(logging.Formatter('%(message)s'))
-logger.addHandler(handler)
 
 
 def get_feel_for_values(values: np.ndarray, label: str = "Values"):
@@ -459,7 +448,7 @@ def test_downstream_task_a_(
             'task_a_predictor_type': predictor_type,
         }
 
-    register_result(exp_label, config, val_metrics['mse'], baseline_mse2)
+    register_result(exp_label, {'mse': val_metrics['mse'], 'baseline_mse': baseline_mse2, 'config': config})
 
     # Save the payoff predictor model
     results_dir = Path("results") / exp_label
@@ -875,7 +864,7 @@ def test_downstream_task_d(
             'task_d_predictor_type': predictor_type,
         }
 
-    register_result(exp_label, config, val_metrics['mse'], baseline_mse)
+    register_result(exp_label, {'mse': val_metrics['mse'], 'baseline_mse': baseline_mse, 'config': config})
 
 def get_policies_and_embeddings(game, player_id: int, ppo_agents: list[PPOAgent], experiment_label: str, game_short_name: str, device: str):
     print("\nTraining autoencoder on agent weights...")
@@ -971,7 +960,104 @@ device=device)
 
 
 
-runs_to_load = {
+def _worker_init():
+    """Disable tqdm in worker processes.
+
+    os.environ["TQDM_DISABLE"] doesn't work here because unpickling this
+    function triggers the import of this module (and tqdm) before the
+    initializer body runs. Patching the class works because it fires at
+    instance-creation time, after all imports are done.
+    """
+    from functools import partialmethod
+    tqdm.__init__ = partialmethod(tqdm.__init__, disable=True)
+
+
+def _run_experiment(spec: dict) -> tuple:
+    """Generic worker: loads data for one source, runs one task, returns (label, result)."""
+    source = spec['source']
+    task = spec['task']
+    game_name = spec['game_name']
+    player_id = spec['player_id']
+    label = spec['label']
+    embedding_type = spec['embedding_type']
+
+    game = pyspiel.load_game(game_name)
+    game_short_name = game.get_type().short_name
+    device = get_device_string()
+
+    # --- load policies and embeddings ---
+    if source == 'neupl':
+        policies_and_embeddings = make_neupl_policies(
+            game_short_name,
+            neupl_config=spec['neupl_config'],
+            original_num_policies=23,
+            num_policies_to_make=spec['N'],
+            directory=spec['run_dir'],
+            interpolate_prenorm=spec['INTERPOLATE_PRENORM'],
+            sampling_mode=spec['NEUPL_SAMPLING_MODE'],
+        )
+        policies = [p_e[1] for p_e in policies_and_embeddings[player_id]]
+        embeddings = [p_e[0].detach().cpu().numpy() for p_e in policies_and_embeddings[player_id]]
+    elif source == 'psro':
+        ppo_agents = load_ppo_agents_from_psro(
+            game_short_name=game_short_name, hidden_size=256, player_id=player_id, shuffle=True)
+        if embedding_type == 'identity':
+            policies, embeddings = get_policies_and_embeddings2(
+                game, player_id, ppo_agents, "psro_" + game_short_name, game_short_name, device)
+        else:
+            policies, embeddings = get_policies_and_embeddings(
+                game, player_id, ppo_agents, "psro_" + game_short_name, game_short_name, device)
+    elif source == 'random':
+        info_state_size = game.information_state_tensor_shape()
+        num_actions = game.num_distinct_actions()
+        layer_init = make_diverse_random_kuhn_poker_layer_init(game)
+        ppo_agents = [PPOAgent(num_actions, info_state_size, 'cpu', layer_init, 256)
+                      for _ in range(spec['N_random'])]
+        if embedding_type == 'identity':
+            policies, embeddings = get_policies_and_embeddings2(
+                game, player_id, ppo_agents, "ppo random " + game_short_name, game_short_name, device)
+        else:
+            policies, embeddings = get_policies_and_embeddings(
+                game, player_id, ppo_agents, "ppo random " + game_short_name, game_short_name, device)
+    else:
+        raise ValueError(f"Unknown source: {source}")
+
+    # --- run task ---
+    experiment_info = ExperimentInfo(_label_string=label, embedding_type=embedding_type)
+    if task == 'a':
+        config = TaskAConfig(
+            model_config=ModelConfig(model_type=spec['predictor_type']),
+            validation_split=0.2,
+        )
+        result = run_task_a(game=game, policies=policies, embeddings=embeddings,
+                            config=config, experiment_info=experiment_info, device=device)
+    elif task == 'd':
+        config = TaskDConfig(
+            model_config=ModelConfig(model_type=spec['predictor_type']),
+            player_id=player_id,
+            validation_split=0.2,
+        )
+        result = run_task_d(game=game, policies=policies, embeddings=embeddings,
+                            config=config, experiment_info=experiment_info, device=device)
+    elif task == 'e':
+        config = TaskEConfig(
+            model_config=ModelConfig(optimizer_type=spec.get('optimizer_type', 'adamw')),
+            player_id=player_id,
+            validation_split=0.2,
+            epochs=spec.get('epochs', 10),
+            num_steps_per_policy_per_epoch=spec.get('num_steps_per_policy_per_epoch', 40),
+            num_trajectories_per_policy_per_epoch=spec.get('num_trajectories_per_policy_per_epoch', 7),
+            compare_to_control=True,
+        )
+        result = run_task_e(game=game, policies=policies, embeddings=embeddings,
+                            config=config, experiment_info=experiment_info, device=device)
+    else:
+        raise ValueError(f"Unknown task: {task}")
+
+    return label, result
+
+
+LEDUC_RUNS_TO_LOAD = {
     True: [
         '2025-12-12_11-19-54-744419_40b',
         '2025-12-11_23-59-52-950280_b14',
@@ -987,213 +1073,113 @@ if __name__ == "__main__":
     # run_all()
     # exit()
 
-    RUN_TASK_A = True
-    RUN_TASK_B = True
-    RUN_TASK_C = True
-    RUN_TASK_D = True
+    RUN_TASK_A = False
+    RUN_TASK_B = False
+    RUN_TASK_C = False
+    RUN_TASK_D = False
+    RUN_TASK_E = True
 
     RUN_NEUPL = True
     RUN_PSRO = False
     RUN_RANDOM = False
 
-    # Initialize run start time
-    run_start_time = datetime.now()
+    NUM_SEEDS = 1
 
+    MAX_WORKERS = 3  # tune to available CPUs
+
+    # Set up file + stream logging only in the main process
+    run_start_time = datetime.now()
+    Path("logs").mkdir(parents=True, exist_ok=True)
+    _fh = logging.FileHandler('logs/all_downstream_tasks.log', mode='w')
+    _fh.setFormatter(logging.Formatter('%(message)s'))
+    logger.addHandler(_fh)
+    _sh = logging.StreamHandler()
+    _sh.setFormatter(logging.Formatter('%(message)s'))
+    logger.addHandler(_sh)
+
+    game_name = "kuhn_poker"
+    # game_name = "leduc_poker"
     device = get_device_string()
     print("Using device:", device)
-    # game = pyspiel.load_game("kuhn_poker")
-    game = pyspiel.load_game("leduc_poker")
-    game_short_name = game.get_type().short_name
-    info_state_size = game.information_state_tensor_shape()
-    num_actions = game.num_distinct_actions()
-    layer_init = make_diverse_random_kuhn_poker_layer_init(game)
+
+    N = 1000
+    NEUPL_SAMPLING_MODE = "gaussian"
+    INTERPOLATE_PRENORM = True
+    PREDICTOR_TYPE = 'random_forest'
+
+    # Pre-resolve NEUPL directories in the main process so workers never call input().
+    # For leduc_poker, directories are hardcoded per (use_randall_loss, seed_num).
+    # For other games, prompt once per use_randall_loss and reuse across all seeds.
+    neupl_run_dirs = {}  # (use_randall_loss, seed_num) -> dir_name str
+    if RUN_NEUPL:
+        if game_name == "leduc_poker":
+            for rl in [True, False]:
+                for s in range(3):
+                    neupl_run_dirs[(rl, s)] = LEDUC_RUNS_TO_LOAD[rl][s]
+        else:
+            for use_randall_loss in [True, False]:
+                chosen = select_neupl_directory(game_name, use_randall_loss, hidden_size=256)
+                for s in range(3):
+                    neupl_run_dirs[(use_randall_loss, s)] = chosen
+
+    # Build one spec dict per individual experiment (one run_task_* call)
+    game_short_name = pyspiel.load_game(game_name).get_type().short_name
+    specs = []
     for seed_num in range(3):
-        # for player_id in range(2):
         if RUN_NEUPL:
             for use_randall_loss in [True, False]:
-                # logger.info(f"--Running task: NEUPL {game_short_name} player_id={player_id} use_randall_loss={use_randall_loss}")
-                N = 1000 # 1500 or 3000 works fine for kuhn
-                NEUPL_SAMPLING_MODE = "gaussian"
-                INTERPOLATE_PRENORM = True
-                PREDICTOR_TYPE = 'random_forest'
-                neupl_config = {
-                    'use_randall_loss': use_randall_loss,
-                    'hidden_size': 256,
-                    'policy_embedding_size': 64,
-                }
+                run_dir = neupl_run_dirs[(use_randall_loss, seed_num)]
+                neupl_config = {'use_randall_loss': use_randall_loss,
+                                'hidden_size': 256, 'policy_embedding_size': 64}
                 for player_id in range(2):
-                    policies_and_embeddings = make_neupl_policies(
-                        game_short_name,
-                        neupl_config=neupl_config,
-                        original_num_policies=23,
-                        num_policies_to_make=N,
-                        directory=runs_to_load[use_randall_loss][seed_num],
-                        interpolate_prenorm=INTERPOLATE_PRENORM,
-                        sampling_mode=NEUPL_SAMPLING_MODE,
-                    )
-                    policies, embeddings = [p_e[1] for p_e in policies_and_embeddings[player_id]], [p_e[0].detach().cpu().numpy() for p_e in policies_and_embeddings[player_id]]
-
+                    base = dict(source='neupl', game_name=game_name, player_id=player_id,
+                                embedding_type='neupl', run_dir=run_dir, neupl_config=neupl_config,
+                                N=N, NEUPL_SAMPLING_MODE=NEUPL_SAMPLING_MODE,
+                                INTERPOLATE_PRENORM=INTERPOLATE_PRENORM)
                     if RUN_TASK_A:
-                        exp_label = f'{game_short_name} neupl p{player_id} randloss={use_randall_loss} N={N} Task A'
-                        logger.info(f"--Running task: NEUPL {game_short_name} player_id={player_id} use_randall_loss={use_randall_loss} Task A")
-                        task_a_config = TaskAConfig(
-                            model_config=ModelConfig(model_type=PREDICTOR_TYPE),
-                            validation_split=0.2
-                        )
-                        run_task_a(
-                            game=game,
-                            policies=policies,
-                            embeddings=embeddings,
-                            config=task_a_config,
-                            exp_label=exp_label,
-                            device=device
-                        )
+                        specs.append({**base, 'task': 'a', 'predictor_type': PREDICTOR_TYPE,
+                                      'label': f'{game_short_name} neupl({INTERPOLATE_PRENORM})({NEUPL_SAMPLING_MODE[:1]}) p{player_id} randloss={use_randall_loss} N={N} Task A'})
                     if RUN_TASK_D:
-                        exp_label = f'{game_short_name} neupl p{player_id} randloss={use_randall_loss} N={N} Task D'
-                        logger.info(f"--Running task: NEUPL {game_short_name} player_id={player_id} use_randall_loss={use_randall_loss} Task D")
-                        task_d_config = TaskDConfig(
-                            model_config=ModelConfig(model_type=PREDICTOR_TYPE),
-                            player_id=player_id,
-                            validation_split=0.2
-                        )
-                        run_task_d(
-                            game=game,
-                            policies=policies,
-                            embeddings=embeddings,
-                            config=task_d_config,
-                            exp_label=exp_label,
-                            device=device
-                        )
+                        specs.append({**base, 'task': 'd', 'predictor_type': PREDICTOR_TYPE,
+                                      'label': f'{game_short_name} neupl p{player_id} randloss={use_randall_loss} N={N} Task D'})
+                    if RUN_TASK_E:
+                        specs.append({**base, 'task': 'e',
+                                      'label': f'{game_short_name} neupl p{player_id} randloss={use_randall_loss} N={N} Task E'})
         if RUN_PSRO:
             for player_id in range(2):
-            # logger.info(f"--Running tasks: PSRO {game_short_name} player_id={player_id}")
-                psro_ppo_agents_256 = load_ppo_agents_from_psro(game_short_name=game_short_name, hidden_size=256, player_id=player_id, shuffle=True)
-                policies, embeddings = get_policies_and_embeddings(game, player_id, psro_ppo_agents_256, "psro_" + game_short_name, game_short_name, device)
-                _, identity_embeddings = get_policies_and_embeddings2(game, player_id, psro_ppo_agents_256, "psro_" + game_short_name, game_short_name, device)
-                if RUN_TASK_A:
-                    exp_label = f'{game_short_name} psro {player_id} reconstruction-autoencoder Task A'
-                    logger.info(f"--Running task: PSRO {game_short_name} player_id={player_id} reconstruction-autoencoder Task A")
-                    task_a_config = TaskAConfig(
-                        model_config=ModelConfig(model_type="linear"),
-                        validation_split=0.2
-                    )
-                    run_task_a(
-                        game=game,
-                        policies=policies,
-                        embeddings=embeddings,
-                        config=task_a_config,
-                        exp_label=exp_label,
-                        device=device
-                    )
-                    exp_label = f'{game_short_name} psro {player_id} identity Task A'
-                    logger.info(f"--Running task: PSRO {game_short_name} player_id={player_id} identity Task A")
-                    task_a_config = TaskAConfig(
-                        model_config=ModelConfig(model_type="linear"),
-                        validation_split=0.2
-                    )
-                    run_task_a(
-                        game=game,
-                        policies=policies,
-                        embeddings=identity_embeddings,
-                        config=task_a_config,
-                        exp_label=exp_label,
-                        device=device
-                    )
-                if RUN_TASK_D:
-                    exp_label = f'{game_short_name} psro {player_id} reconstruction-autoencoder Task D'
-                    logger.info(f"--Running task: PSRO {game_short_name} player_id={player_id} reconstruction-autoencoder Task D")
-                    task_d_config = TaskDConfig(
-                        model_config=ModelConfig(model_type="linear"),
-                        player_id=player_id,
-                        validation_split=0.2
-                    )
-                    run_task_d(
-                        game=game,
-                        policies=policies,
-                        embeddings=embeddings,
-                        config=task_d_config,
-                        exp_label=exp_label,
-                        device=device
-                    )
-                    exp_label = f'{game_short_name} psro {player_id} identity Task D'
-                    logger.info(f"--Running task: PSRO {game_short_name} player_id={player_id} identity Task D")
-                    task_d_config = TaskDConfig(
-                        model_config=ModelConfig(model_type="linear"),
-                        player_id=player_id,
-                        validation_split=0.2
-                    )
-                    run_task_d(
-                        game=game,
-                        policies=policies,
-                        embeddings=identity_embeddings,
-                        config=task_d_config,
-                        exp_label=exp_label,
-                        device=device
-                    )
+                for emb_type in ['reconstruction-autoencoder', 'identity']:
+                    base = dict(source='psro', game_name=game_name, player_id=player_id,
+                                embedding_type=emb_type)
+                    if RUN_TASK_A:
+                        specs.append({**base, 'task': 'a', 'predictor_type': 'linear',
+                                      'label': f'{game_short_name} psro {player_id} {emb_type} Task A'})
+                    if RUN_TASK_D:
+                        specs.append({**base, 'task': 'd', 'predictor_type': 'linear',
+                                      'label': f'{game_short_name} psro {player_id} {emb_type} Task D'})
+                    if RUN_TASK_E:
+                        specs.append({**base, 'task': 'e',
+                                      'label': f'{game_short_name} psro {player_id} {emb_type} Task E'})
         if RUN_RANDOM:
-            N = 1000
-            ppo_agents = [PPOAgent(num_actions, info_state_size, 'cpu', layer_init, 256) for _ in range(N)]
-            player_id = 0
-            policies, embeddings = get_policies_and_embeddings(game, player_id, ppo_agents, "ppo random " + game_short_name, game_short_name, device)
-            _, identity_embeddings = get_policies_and_embeddings2(game, player_id, ppo_agents, "ppo random " + game_short_name, game_short_name, device)
-            if RUN_TASK_A:
-                exp_label = f'{game_short_name} ppo random {player_id} reconstruction-autoencoder Task A'
-                logger.info(f"--Running task: PPO random {game_short_name} reconstruction-autoencoder Task A")
-                task_a_config = TaskAConfig(
-                    model_config=ModelConfig(model_type="linear"),
-                    validation_split=0.2
-                )
-                run_task_a(
-                    game=game,
-                    policies=policies,
-                    embeddings=embeddings,
-                    config=task_a_config,
-                    exp_label=exp_label,
-                    device=device
-                )
-                exp_label = f'{game_short_name} ppo random {player_id} identity Task A'
-                logger.info(f"--Running task: PPO random {game_short_name} identity Task A")
-                task_a_config = TaskAConfig(
-                    model_config=ModelConfig(model_type="linear"),
-                    validation_split=0.2
-                )
-                run_task_a(
-                    game=game,
-                    policies=policies,
-                    embeddings=identity_embeddings,
-                    config=task_a_config,
-                    exp_label=exp_label,
-                    device=device
-                )
-            if RUN_TASK_D:
-                exp_label = f'{game_short_name} ppo random {player_id} reconstruction-autoencoder Task D'
-                logger.info(f"--Running task: PPO random {game_short_name} reconstruction-autoencoder Task D")
-                task_d_config = TaskDConfig(
-                    model_config=ModelConfig(model_type="linear"),
-                    player_id=player_id,
-                    validation_split=0.2
-                )
-                run_task_d(
-                    game=game,
-                    policies=policies,
-                    embeddings=embeddings,
-                    config=task_d_config,
-                    exp_label=exp_label,
-                    device=device
-                )
-                exp_label = f'{game_short_name} ppo random {player_id} identity Task D'
-                logger.info(f"--Running task: PPO random {game_short_name} identity Task D")
-                task_d_config = TaskDConfig(
-                    model_config=ModelConfig(model_type="linear"),
-                    player_id=player_id,
-                    validation_split=0.2
-                )
-                run_task_d(
-                    game=game,
-                    policies=policies,
-                    embeddings=identity_embeddings,
-                    config=task_d_config,
-                    exp_label=exp_label,
-                    device=device
-                )
+            for emb_type in ['reconstruction-autoencoder', 'identity']:
+                base = dict(source='random', game_name=game_name, player_id=0,
+                            embedding_type=emb_type, N_random=1000)
+                if RUN_TASK_A:
+                    specs.append({**base, 'task': 'a', 'predictor_type': 'linear',
+                                  'label': f'{game_short_name} ppo random 0 {emb_type} Task A'})
+                if RUN_TASK_D:
+                    specs.append({**base, 'task': 'd', 'predictor_type': 'linear',
+                                  'label': f'{game_short_name} ppo random 0 {emb_type} Task D'})
+
+    logger.info(f"Submitting {len(specs)} jobs with max_workers={MAX_WORKERS}")
+    with ProcessPoolExecutor(max_workers=MAX_WORKERS, initializer=_worker_init) as executor:
+        future_to_label = {executor.submit(_run_experiment, spec): spec['label'] for spec in specs}
+        for future in tqdm(as_completed(future_to_label), total=len(future_to_label), desc="Jobs"):
+            label = future_to_label[future]
+            try:
+                label, result = future.result()
+                register_result(label, result, save=True)
+                logger.info(f"Completed: {label}")
+            except Exception as exc:
+                logger.error(f"Worker failed [{label}]: {exc}")
+
     save_results()
