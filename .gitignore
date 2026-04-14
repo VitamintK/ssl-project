@@ -22,6 +22,20 @@ results/**/old/
 
 outputs/
 
+# Generated logs
+logs/all_downstream_tasks.log
+
+# Generated images and metrics
+training_metrics.png
+training_payoffs.png
+results/training_metrics/
+
+# Auto-generated result backups
+results/archive/
+
+# Experiment run configs in test dirs (keep .pt checkpoints via !results/**/*.pt)
+results/test/**/config.json
+
 # Test files
 test_downstream_smoke.py
 *.zip
