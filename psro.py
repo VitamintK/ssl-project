@@ -167,6 +167,57 @@ def load_ppo_agents_from_single_psro_folder(
     return ppo_agents
 
 
+def select_neupl_directory(
+        game_short_name: str,
+        use_randall_loss: bool,
+        hidden_size: int = 512,
+) -> str:
+    """Prompt the user to pick a NEUPL checkpoint directory and return its name.
+
+    Intended to be called in the main process before spawning workers, so
+    that workers never need to call input().
+    """
+    PATH = f"results/test/neupl/ppo/hs{hidden_size}/{game_short_name}"
+    base_dir = Path(PATH)
+    subdirs = sorted([d for d in base_dir.iterdir() if d.is_dir()],
+                     key=lambda d: d.stat().st_mtime, reverse=True)
+
+    filtered = []
+    for subdir in subdirs:
+        config_path = subdir / "config.json"
+        if config_path.exists():
+            try:
+                import json
+                with open(config_path) as f:
+                    cfg = json.load(f)
+                if cfg.get("use_randall_loss") == use_randall_loss:
+                    filtered.append(subdir)
+            except Exception as e:
+                print(f"Warning: Failed to parse {config_path}: {e}")
+        # skip dirs without a config when filtering by use_randall_loss
+
+    recent = filtered[:10]
+    print(f"\nNEUPL directories for use_randall_loss={use_randall_loss}:")
+    dir_info = []
+    for idx, subdir in enumerate(recent):
+        pt_files = list(subdir.glob("*.pt"))
+        dir_info.append((subdir, len(pt_files)))
+        print(f"  [{idx}]: {subdir.name} - {len(pt_files)} .pt files")
+
+    selected_idx = None
+    while selected_idx is None:
+        try:
+            i = int(input("Select directory index: ").strip())
+            if 0 <= i < len(dir_info):
+                selected_idx = i
+            else:
+                print(f"Enter a number between 0 and {len(dir_info) - 1}.")
+        except Exception:
+            print("Enter an integer.")
+
+    return dir_info[selected_idx][0].name
+
+
 def load_ppo_agents_from_neupl(
         game_short_name: str = 'kuhn_poker',
         use_randall_loss: bool = False,
@@ -182,56 +233,8 @@ def load_ppo_agents_from_neupl(
     info_state_size = game.information_state_tensor_shape()
     num_actions = game.num_distinct_actions()
     if dir_name is None:
-        import glob
-        # List the most recent 10 subdirectories in base_dir
-        subdirs = [d for d in base_dir.iterdir() if d.is_dir()]
-        # Sort by modification time, most recent first
-        subdirs = sorted(subdirs, key=lambda d: d.stat().st_mtime, reverse=True)
-        # Filter subdirs by use_randall_loss if use_randall_loss is not None
-        filtered_subdirs = []
-        for subdir in subdirs:
-            config_path = subdir / "config.json"
-            if config_path.exists():
-                try:
-                    import json
-                    with open(config_path, "r") as f:
-                        config = json.load(f)
-                    config_value = config.get("use_randall_loss")
-                    # If argument is None, show all. Otherwise must match exactly.
-                    if use_randall_loss is None or config_value == use_randall_loss:
-                        filtered_subdirs.append(subdir)
-                except Exception as e:
-                    print(f"Warning: Failed to parse {config_path}: {e}")
-                    # If the config can't be parsed or missing key, skip if filtering, else include
-                    if use_randall_loss is None:
-                        filtered_subdirs.append(subdir)
-            else:
-                # If there's no config.json, include if not filtering, else skip
-                if use_randall_loss is None:
-                    filtered_subdirs.append(subdir)
-        subdirs = filtered_subdirs
-
-        recent_subdirs = subdirs[:10]
-        dir_info = []
-        print("Most recent 10 directories and .pt file counts:")
-        for idx, subdir in enumerate(recent_subdirs):
-            pt_files = list(subdir.glob("*.pt"))
-            dir_info.append((subdir, len(pt_files)))
-            print(f"[{idx}]: {subdir.name} - {len(pt_files)} .pt files")
-
-        selected_idx = None
-        while selected_idx is None:
-            try:
-                user_input = input("Select the directory to load by entering its index (0-9): ").strip()
-                i = int(user_input)
-                if 0 <= i < len(dir_info):
-                    selected_idx = i
-                else:
-                    print("Invalid index. Try again.")
-            except Exception:
-                print("Invalid input. Enter an integer between 0 and 9.")
-
-        dir_name = dir_info[selected_idx][0]
+        dir_name = select_neupl_directory(game_short_name, use_randall_loss, hidden_size)
+        dir_name = base_dir / dir_name
     else:
         dir_name = base_dir / dir_name
     print(f"Loading from directory: {dir_name}")
@@ -263,6 +266,8 @@ def load_ppo_agents_from_neupl(
     )
     agent0.load(pt0)
     agent1.load(pt1)
+    agent0.eval()
+    agent1.eval()
     return agent0, agent1
 
 def make_ppo_policies_from_neupl_agents(
