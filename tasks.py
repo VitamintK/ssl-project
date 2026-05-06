@@ -401,11 +401,16 @@ def run_task_e(
 
     # Create predictor
     # TODO: actually use hydra or don't
-    config_path = 'configs/ppo_kuhn_poker.yaml'
+    if game.get_type().short_name == 'kuhn_poker':
+        config_path = 'configs/ppo_kuhn_poker.yaml'
+    elif game.get_type().short_name == 'leduc_poker':
+        config_path = 'configs/ppo_leduc_poker.yaml'
+    else:
+        raise ValueError(f"Unknown game: {game.get_type().short_name}")
     algorithm_config = OmegaConf.load(config_path)
     args = OmegaConf.load('configs/experiment.yaml')
     args.algorithm = algorithm_config
-    # policies, embeddings = policies[:3], embeddings[:3]
+    # policies, embeddings = policies[:3], embeddings[:3] # TODO: remove this
     predictor = BestResponseLearner(
         game=game,
         policies=policies,
@@ -417,7 +422,7 @@ def run_task_e(
     predictor.train_best_responder(
         optimizer_type=config.model_config.optimizer_type,
         epochs=config.epochs,
-        num_steps_per_policy_per_epoch=config.num_steps_per_policy_per_epoch,
+        max_batch_size=config.max_batch_size,
         num_trajectories_per_policy_per_epoch=config.num_trajectories_per_policy_per_epoch,
         experiment_info=experiment_info,
     )
@@ -453,7 +458,7 @@ def run_task_e(
 
         predictor.train_best_responder(
             epochs=config.epochs,
-            num_steps_per_policy_per_epoch=config.num_steps_per_policy_per_epoch,
+            max_batch_size=config.max_batch_size,
             num_trajectories_per_policy_per_epoch=config.num_trajectories_per_policy_per_epoch,
             experiment_info=experiment_info,
         )
@@ -469,6 +474,7 @@ def run_task_e(
     result = {
         'val_metrics': predictor_metrics,
         'config': config_to_dict(config),
+        'omega_conf': OmegaConf.to_container(args),
     }
     if config.compare_to_control:
         result['control_metrics'] = control_metrics

@@ -24,9 +24,11 @@ class ExperimentInfo:
     Attributes:
         _label_string: The human-readable label for this experiment
         embedding_type: The type of embedding used (e.g., 'identity', 'weight_autoencoder', 'functional_encoder')
+        task_id: Single uppercase letter identifying the task ('A', 'B', 'C', 'D', 'E')
     """
     _label_string: str
     embedding_type: str
+    task_id: str = ""
 
     @property
     def label_string(self) -> str:
@@ -158,7 +160,7 @@ class TaskEConfig:
     model_config: ModelConfig = field(default_factory=ModelConfig)
     player_id: int = 0  # Which player perspective to evaluate exploitability from
     validation_split: float = 0.2
-    num_steps_per_policy_per_epoch: int = 20
+    max_batch_size: int = 20
     num_trajectories_per_policy_per_epoch: int = 2
     epochs: int = 5
     compare_to_control: bool = False  # If True, also train/eval with shuffled embeddings as control
@@ -168,8 +170,8 @@ class TaskEConfig:
             raise ValueError(f"player_id must be 0 or 1, got {self.player_id}")
         if not 0 < self.validation_split < 1:
             raise ValueError(f"validation_split must be in (0, 1), got {self.validation_split}")
-        if self.num_steps_per_policy_per_epoch < 1:
-            raise ValueError(f"num_steps_per_policy_per_epoch must be >= 1, got {self.num_steps_per_policy_per_epoch}")
+        if self.max_batch_size < 1:
+            raise ValueError(f"max_batch_size must be >= 1, got {self.max_batch_size}")
         if self.epochs < 1:
             raise ValueError(f"epochs must be >= 1, got {self.epochs}")
 

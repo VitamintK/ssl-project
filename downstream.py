@@ -400,8 +400,8 @@ class ModelTrainer:
             'mse': mse,
             'mae': mae,
             'baseline_mse': baseline_mse,
-            'predictions': predictions,
-            'ground_truth': ground_truth
+            # 'predictions': predictions,
+            # 'ground_truth': ground_truth
         }
 
     def predict(self, X: np.ndarray) -> np.ndarray:
@@ -937,7 +937,7 @@ class BestResponseLearner:
         self.game = game
         self.policies = policies
         if isinstance(embeddings[0], np.ndarray):
-            self.embeddings = torch.tensor(embeddings, dtype=torch.float32, device=self.device)
+            self.embeddings = torch.tensor(np.array(embeddings), dtype=torch.float32, device=self.device)
         else:
             self.embeddings = embeddings
         self.policy_player_id = policy_player_id
@@ -953,7 +953,7 @@ class BestResponseLearner:
         self.val_embeddings = self.embeddings[self.val_indices]
         print(f"BestResponseLearner split: {len(self.train_policies)} train, {len(self.val_policies)} val")
 
-    def train_best_responder(self, optimizer_type="adam", epochs=1, num_steps_per_policy_per_epoch=20, num_trajectories_per_policy_per_epoch=2, experiment_info: ExperimentInfo = None):
+    def train_best_responder(self, optimizer_type="adam", epochs=1, max_batch_size=20, num_trajectories_per_policy_per_epoch=2, experiment_info: ExperimentInfo = None):
         NUM_ENVS = 1
         # num_steps_per_batch = 20 # self.config.num_steps # IS THIS USED?
         info_state_shape = self.game.information_state_tensor_shape()
@@ -967,8 +967,8 @@ class BestResponseLearner:
         #     num_policies=1, # we don't use the embedding layer, since we already have the embeddings
         #     policy_embedding_size=self.embeddings[0].shape,
         # )
-        batch_size = int(NUM_ENVS * num_steps_per_policy_per_epoch)
-        num_updates = self.meta_config.max_steps // batch_size + 1 # THIS IS NOT USED
+        # batch_size = int(NUM_ENVS * max_batch_size)
+        # num_updates = self.meta_config.max_steps // batch_size + 1 # THIS IS NOT USED
         # envs = SyncVectorEnv(
         #     [
         #         make_single_env(
@@ -985,7 +985,7 @@ class BestResponseLearner:
             num_actions=game.num_distinct_actions(),
             num_players=game.num_players(),
             num_envs=NUM_ENVS,
-            steps_per_batch=num_steps_per_policy_per_epoch,
+            steps_per_batch=max_batch_size,
             num_minibatches=self.config.num_minibatches,
             update_epochs=self.config.update_epochs,
             learning_rate=self.config.learning_rate,
@@ -1076,7 +1076,14 @@ class BestResponseLearner:
                     discounts=time_step.discounts,
                     step_type=time_step.step_type,
                 )
-                metrics = self.agent.learn([fixed_time_step])
+                metrics = None
+                if self.agent.cur_batch_idx >= 2:
+                    metrics = self.agent.learn([fixed_time_step])
+                else:
+                    self.agent.cur_batch_idx = 0
+                # Snap total_steps_done to a multiple of steps_per_batch so the auto-learn
+                # trigger fires only after a full buffer accumulates, not after 1 step.
+                self.agent.total_steps_done = (self.agent.total_steps_done // self.agent.steps_per_batch) * self.agent.steps_per_batch
                 if metrics is not None:
                     ppo_metrics_list.append(metrics)
 

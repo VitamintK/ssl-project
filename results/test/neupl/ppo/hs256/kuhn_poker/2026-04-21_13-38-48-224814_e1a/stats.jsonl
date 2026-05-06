@@ -1,0 +1,4 @@
+{"episodes": 23300, "walltime": 4.3075347079429775, "exploitability": 0.42423304668802775, "exploitability_per_player": [0.2781015762726921, 0.5703645171033633]}
+{"episodes": 33500, "walltime": 9.873328332905658, "exploitability": 0.31105153891347764, "exploitability_per_player": [0.17776540207054253, 0.44433767575641275]}
+{"episodes": 43700, "walltime": 15.562241124920547, "exploitability": 0.3427251354736955, "exploitability_per_player": [0.605929861373163, 0.07952040957422801]}
+{"episodes": 53900, "walltime": 21.13168583298102, "exploitability": 0.36994644124850573, "exploitability_per_player": [0.7245123167927128, 0.015380565704298632]}

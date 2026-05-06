@@ -48,13 +48,18 @@ def _strip_arrays(result: dict) -> dict:
     return out
 
 
-def register_result(experiment_label: str, result: dict, save: bool = True):
-    existing = next((r for r in results['run'] if r['experiment_label'] == experiment_label), None)
+def register_result(experiment_info: ExperimentInfo, result: dict, save: bool = True):
+    label = experiment_info.label_string
+    task_id = experiment_info.task_id or None
+    existing = next((r for r in results['run'] if r['experiment_label'] == label), None)
     stripped = _strip_arrays(result)
     if existing:
         existing['results'].append(stripped)
     else:
-        results['run'].append({'experiment_label': experiment_label, 'results': [stripped]})
+        run_entry = {'experiment_label': label, 'results': [stripped]}
+        if task_id:
+            run_entry['task_id'] = task_id
+        results['run'].append(run_entry)
 
     if save:
         save_results()
@@ -466,7 +471,7 @@ def test_downstream_task_a_with_neupl(
         device: str = "cpu",
 ):
     game_short_name = game.get_type().short_name
-    policies_and_embeddings = make_neupl_policies(game_short_name, hidden_size=256, policy_embedding_size=64, original_num_policies=22, num_policies_to_make=3000)
+    policies_and_embeddings = make_neupl_policies(game_short_name, neupl_config=dict(hidden_size=256, policy_embedding_size=64), num_policies_to_make=3000)
     opponent_policy = policy_lib.UniformRandomPolicy(game)
     if predictor_type == "mlp":
         hidden_dims = [128, 64, 32]
@@ -973,32 +978,34 @@ def _worker_init():
 
 
 def _run_experiment(spec: dict) -> tuple:
-    """Generic worker: loads data for one source, runs one task, returns (label, result)."""
+    """Generic worker: loads data for one source, runs one task, returns (experiment_info, result)."""
     source = spec['source']
     task = spec['task']
     game_name = spec['game_name']
     player_id = spec['player_id']
-    label = spec['label']
-    embedding_type = spec['embedding_type']
+    experiment_info = spec['experiment_info']
+    embedding_type = experiment_info.embedding_type
 
     game = pyspiel.load_game(game_name)
     game_short_name = game.get_type().short_name
     device = get_device_string()
 
     # --- load policies and embeddings ---
+    model_dir = None
     if source == 'neupl':
+        model_dir = spec['run_dir']
         policies_and_embeddings = make_neupl_policies(
             game_short_name,
             neupl_config=spec['neupl_config'],
-            original_num_policies=23,
             num_policies_to_make=spec['N'],
-            directory=spec['run_dir'],
+            directory=model_dir,
             interpolate_prenorm=spec['INTERPOLATE_PRENORM'],
             sampling_mode=spec['NEUPL_SAMPLING_MODE'],
         )
         policies = [p_e[1] for p_e in policies_and_embeddings[player_id]]
         embeddings = [p_e[0].detach().cpu().numpy() for p_e in policies_and_embeddings[player_id]]
     elif source == 'psro':
+        model_dir = f"results/test/psro/ppo/hs256/{game_short_name}"
         ppo_agents = load_ppo_agents_from_psro(
             game_short_name=game_short_name, hidden_size=256, player_id=player_id, shuffle=True)
         if embedding_type == 'identity':
@@ -1023,7 +1030,6 @@ def _run_experiment(spec: dict) -> tuple:
         raise ValueError(f"Unknown source: {source}")
 
     # --- run task ---
-    experiment_info = ExperimentInfo(_label_string=label, embedding_type=embedding_type)
     if task == 'a':
         config = TaskAConfig(
             model_config=ModelConfig(model_type=spec['predictor_type']),
@@ -1040,13 +1046,23 @@ def _run_experiment(spec: dict) -> tuple:
         result = run_task_d(game=game, policies=policies, embeddings=embeddings,
                             config=config, experiment_info=experiment_info, device=device)
     elif task == 'e':
+        if spec['game_name'] == 'kuhn_poker':
+            epochs = 10
+            num_trajectories_per_policy_per_epoch = 7
+            max_batch_size = 20
+        elif spec['game_name'] == 'leduc_poker':
+            epochs = 15
+            num_trajectories_per_policy_per_epoch = 13
+            max_batch_size = 30
+        else:
+            raise ValueError(f"Unknown game: {spec['game_name']}")
         config = TaskEConfig(
             model_config=ModelConfig(optimizer_type=spec.get('optimizer_type', 'adamw')),
             player_id=player_id,
             validation_split=0.2,
-            epochs=spec.get('epochs', 10),
-            num_steps_per_policy_per_epoch=spec.get('num_steps_per_policy_per_epoch', 40),
-            num_trajectories_per_policy_per_epoch=spec.get('num_trajectories_per_policy_per_epoch', 7),
+            epochs=epochs,
+            max_batch_size=max_batch_size,
+            num_trajectories_per_policy_per_epoch=num_trajectories_per_policy_per_epoch,
             compare_to_control=True,
         )
         result = run_task_e(game=game, policies=policies, embeddings=embeddings,
@@ -1054,7 +1070,9 @@ def _run_experiment(spec: dict) -> tuple:
     else:
         raise ValueError(f"Unknown task: {task}")
 
-    return label, result
+    if model_dir is not None:
+        result['model_dir'] = model_dir
+    return experiment_info, result
 
 
 LEDUC_RUNS_TO_LOAD = {
@@ -1070,6 +1088,12 @@ LEDUC_RUNS_TO_LOAD = {
     ],
 }
 if __name__ == "__main__":
+    import argparse as _argparse
+    _parser = _argparse.ArgumentParser()
+    _parser.add_argument("--no-multiprocessing", action="store_true",
+                         help="Run jobs sequentially instead of in a process pool")
+    _args = _parser.parse_args()
+
     # run_all()
     # exit()
 
@@ -1083,7 +1107,7 @@ if __name__ == "__main__":
     RUN_PSRO = False
     RUN_RANDOM = False
 
-    NUM_SEEDS = 1
+    NUM_SEEDS = 3
 
     MAX_WORKERS = 3  # tune to available CPUs
 
@@ -1097,8 +1121,8 @@ if __name__ == "__main__":
     _sh.setFormatter(logging.Formatter('%(message)s'))
     logger.addHandler(_sh)
 
-    game_name = "kuhn_poker"
-    # game_name = "leduc_poker"
+    # game_name = "kuhn_poker"
+    game_name = "leduc_poker"
     device = get_device_string()
     print("Using device:", device)
 
@@ -1113,9 +1137,11 @@ if __name__ == "__main__":
     neupl_run_dirs = {}  # (use_randall_loss, seed_num) -> dir_name str
     if RUN_NEUPL:
         if game_name == "leduc_poker":
-            for rl in [True, False]:
+            for use_randall_loss in [True, False]:
+                chosen = select_neupl_directory(game_name, use_randall_loss, hidden_size=256)
                 for s in range(3):
-                    neupl_run_dirs[(rl, s)] = LEDUC_RUNS_TO_LOAD[rl][s]
+                    # neupl_run_dirs[(use_randall_loss, s)] = LEDUC_RUNS_TO_LOAD[use_randall_loss][s]
+                    neupl_run_dirs[(use_randall_loss, s)] = chosen
         else:
             for use_randall_loss in [True, False]:
                 chosen = select_neupl_directory(game_name, use_randall_loss, hidden_size=256)
@@ -1125,7 +1151,7 @@ if __name__ == "__main__":
     # Build one spec dict per individual experiment (one run_task_* call)
     game_short_name = pyspiel.load_game(game_name).get_type().short_name
     specs = []
-    for seed_num in range(3):
+    for seed_num in range(NUM_SEEDS):
         if RUN_NEUPL:
             for use_randall_loss in [True, False]:
                 run_dir = neupl_run_dirs[(use_randall_loss, seed_num)]
@@ -1138,13 +1164,19 @@ if __name__ == "__main__":
                                 INTERPOLATE_PRENORM=INTERPOLATE_PRENORM)
                     if RUN_TASK_A:
                         specs.append({**base, 'task': 'a', 'predictor_type': PREDICTOR_TYPE,
-                                      'label': f'{game_short_name} neupl({INTERPOLATE_PRENORM})({NEUPL_SAMPLING_MODE[:1]}) p{player_id} randloss={use_randall_loss} N={N} Task A'})
+                                      'experiment_info': ExperimentInfo(
+                                          f'{game_short_name} neupl({INTERPOLATE_PRENORM})({NEUPL_SAMPLING_MODE[:1]}) p{player_id} randloss={use_randall_loss} N={N} Task A',
+                                          embedding_type='neupl', task_id='A')})
                     if RUN_TASK_D:
                         specs.append({**base, 'task': 'd', 'predictor_type': PREDICTOR_TYPE,
-                                      'label': f'{game_short_name} neupl p{player_id} randloss={use_randall_loss} N={N} Task D'})
+                                      'experiment_info': ExperimentInfo(
+                                          f'{game_short_name} neupl p{player_id} randloss={use_randall_loss} N={N} Task D',
+                                          embedding_type='neupl', task_id='D')})
                     if RUN_TASK_E:
                         specs.append({**base, 'task': 'e',
-                                      'label': f'{game_short_name} neupl p{player_id} randloss={use_randall_loss} N={N} Task E'})
+                                      'experiment_info': ExperimentInfo(
+                                          f'{game_short_name} neupl p{player_id} randloss={use_randall_loss} N={N} Task E',
+                                          embedding_type='neupl', task_id='E')})
         if RUN_PSRO:
             for player_id in range(2):
                 for emb_type in ['reconstruction-autoencoder', 'identity']:
@@ -1152,34 +1184,60 @@ if __name__ == "__main__":
                                 embedding_type=emb_type)
                     if RUN_TASK_A:
                         specs.append({**base, 'task': 'a', 'predictor_type': 'linear',
-                                      'label': f'{game_short_name} psro {player_id} {emb_type} Task A'})
+                                      'experiment_info': ExperimentInfo(
+                                          f'{game_short_name} psro {player_id} {emb_type} Task A',
+                                          embedding_type=emb_type, task_id='A')})
                     if RUN_TASK_D:
                         specs.append({**base, 'task': 'd', 'predictor_type': 'linear',
-                                      'label': f'{game_short_name} psro {player_id} {emb_type} Task D'})
+                                      'experiment_info': ExperimentInfo(
+                                          f'{game_short_name} psro {player_id} {emb_type} Task D',
+                                          embedding_type=emb_type, task_id='D')})
                     if RUN_TASK_E:
                         specs.append({**base, 'task': 'e',
-                                      'label': f'{game_short_name} psro {player_id} {emb_type} Task E'})
+                                      'experiment_info': ExperimentInfo(
+                                          f'{game_short_name} psro {player_id} {emb_type} Task E',
+                                          embedding_type=emb_type, task_id='E')})
         if RUN_RANDOM:
             for emb_type in ['reconstruction-autoencoder', 'identity']:
                 base = dict(source='random', game_name=game_name, player_id=0,
                             embedding_type=emb_type, N_random=1000)
                 if RUN_TASK_A:
                     specs.append({**base, 'task': 'a', 'predictor_type': 'linear',
-                                  'label': f'{game_short_name} ppo random 0 {emb_type} Task A'})
+                                  'experiment_info': ExperimentInfo(
+                                      f'{game_short_name} ppo random 0 {emb_type} Task A',
+                                      embedding_type=emb_type, task_id='A')})
                 if RUN_TASK_D:
                     specs.append({**base, 'task': 'd', 'predictor_type': 'linear',
-                                  'label': f'{game_short_name} ppo random 0 {emb_type} Task D'})
+                                  'experiment_info': ExperimentInfo(
+                                      f'{game_short_name} ppo random 0 {emb_type} Task D',
+                                      embedding_type=emb_type, task_id='D')})
+                if RUN_TASK_E:
+                    specs.append({**base, 'task': 'e',
+                                  'experiment_info': ExperimentInfo(
+                                      f'{game_short_name} ppo random 0 {emb_type} Task E',
+                                      embedding_type=emb_type, task_id='E')})
 
-    logger.info(f"Submitting {len(specs)} jobs with max_workers={MAX_WORKERS}")
-    with ProcessPoolExecutor(max_workers=MAX_WORKERS, initializer=_worker_init) as executor:
-        future_to_label = {executor.submit(_run_experiment, spec): spec['label'] for spec in specs}
-        for future in tqdm(as_completed(future_to_label), total=len(future_to_label), desc="Jobs"):
-            label = future_to_label[future]
+    if _args.no_multiprocessing:
+        logger.info(f"Running {len(specs)} jobs sequentially (no multiprocessing)")
+        for spec in tqdm(specs, desc="Jobs"):
             try:
-                label, result = future.result()
-                register_result(label, result, save=True)
-                logger.info(f"Completed: {label}")
+                exp_info, result = _run_experiment(spec)
+                register_result(exp_info, result, save=True)
+                logger.info(f"Completed: {exp_info.label_string}")
             except Exception as exc:
-                logger.error(f"Worker failed [{label}]: {exc}")
+                logger.error(f"Job failed [{spec['experiment_info'].label_string}]: {exc}")
+                raise exc
+    else:
+        logger.info(f"Submitting {len(specs)} jobs with max_workers={MAX_WORKERS}")
+        with ProcessPoolExecutor(max_workers=MAX_WORKERS, initializer=_worker_init) as executor:
+            future_to_info = {executor.submit(_run_experiment, spec): spec['experiment_info'] for spec in specs}
+            for future in tqdm(as_completed(future_to_info), total=len(future_to_info), desc="Jobs"):
+                exp_info = future_to_info[future]
+                try:
+                    exp_info, result = future.result()
+                    register_result(exp_info, result, save=True)
+                    logger.info(f"Completed: {exp_info.label_string}")
+                except Exception as exc:
+                    logger.error(f"Worker failed [{exp_info.label_string}]: {exc}")
 
     save_results()
