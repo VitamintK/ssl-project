@@ -211,6 +211,7 @@ def train_functional_autoencoder(
     game: pyspiel.Game | None = None,
     agents: list[PPOAgent] | None = None,
     decision_states: list[pyspiel.State] | None = None,
+    checkpoint_path: str | Path | None = None,
 ) -> tuple[Autoencoder, list[float]]:
     """Train a functional autoencoder and return the model plus epoch losses."""
     game = game or pyspiel.load_game("kuhn_poker")
@@ -265,6 +266,10 @@ def train_functional_autoencoder(
         print(f"Epoch {epoch}: KL {avg_loss:.4f}")
         epoch_losses.append(avg_loss)
 
+    if checkpoint_path is not None:
+        save_autoencoder(model, ae_cfg, checkpoint_path)
+        print(f"Saved functional autoencoder checkpoint to {checkpoint_path}")
+
     return model, epoch_losses
 
 
@@ -304,7 +309,7 @@ def _hidden_dims_arg(value: str) -> tuple[int, ...]:
         raise argparse.ArgumentTypeError("hidden dims must not be empty")
     return tuple(dims)
 
-def parse_args() -> TrainingConfig:
+def parse_args() -> tuple[TrainingConfig, str]:
     parser = argparse.ArgumentParser(description="Train functional autoencoder.")
     parser.add_argument("--num-agents", type=int, default=8)
     parser.add_argument("--ppo-hidden-size", type=int, default=256)
@@ -319,6 +324,12 @@ def parse_args() -> TrainingConfig:
         type=float,
         default=1.0,
         help="Fraction of (agent, state) pairs to use for training (0 < f <= 1).",
+    )
+    parser.add_argument(
+        "--checkpoint-path",
+        type=str,
+        default="checkpoints/functional_autoencoder_kuhn_poker.pt",
+        help="Where to save the trained autoencoder checkpoint.",
     )
     args = parser.parse_args()
 
@@ -339,10 +350,10 @@ def parse_args() -> TrainingConfig:
         num_agents=args.num_agents,
         ppo_hidden_size=args.ppo_hidden_size,
         autoencoder=auto_cfg,
-    )
+    ), args.checkpoint_path
 
 
 if __name__ == "__main__":
-    config = parse_args()
+    config, checkpoint_path = parse_args()
     torch.manual_seed(0)
-    train_functional_autoencoder(config)
+    train_functional_autoencoder(config, checkpoint_path=checkpoint_path)
