@@ -25,7 +25,7 @@ from functional_autoencoder import (
     train_functional_autoencoder,
     FunctionalEncoderAdapter,
 )
-from weight_autoencoder import ppo_agent_to_vector, AutoencoderConfig
+from weight_autoencoder import ppo_agent_to_vector, AutoencoderConfig, load_autoencoder
 
 
 logger = logging.getLogger(__name__)
@@ -49,28 +49,11 @@ def load_functional_encoder_from_checkpoint(checkpoint_path: str, device: str = 
     Returns:
         Tuple of (model, adapter, config)
     """
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-
-    # Reconstruct the model
-    from weight_autoencoder import Autoencoder
-    config = checkpoint['config']
-    weight_dim = checkpoint['weight_dim']
-
-    model = Autoencoder(
-        weight_dim,
-        config.autoencoder.hidden_dims,
-        config.autoencoder.bottleneck_dim
-    ).to(device)
-
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.eval()
-
-    # Create adapter
+    model, config = load_autoencoder(checkpoint_path, device=device)
     adapter = FunctionalEncoderAdapter(model, ppo_agent_to_vector)
 
     logger.info(f"Loaded functional autoencoder checkpoint from {checkpoint_path}")
-    logger.info(f"Config: hidden_dims={config.autoencoder.hidden_dims}, "
-                f"bottleneck_dim={config.autoencoder.bottleneck_dim}")
+    logger.info(f"Config: hidden_dims={config.hidden_dims}, bottleneck_dim={config.bottleneck_dim}")
 
     return model, adapter, config
 
