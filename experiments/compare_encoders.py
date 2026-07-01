@@ -288,7 +288,8 @@ def evaluate_strategy_classification(
     print(f"  Computing aggression for {len(agents)} agents...")
     aggression_scores = []
     for agent in tqdm(agents, desc=f"  {name} aggression"):
-        aggression_scores.append(compute_aggression(game, agent))
+        agent_policy = PPOAgentPolicy(game, agent, player_id=0, use_observation=False)
+        aggression_scores.append(compute_aggression(game, agent_policy))
     aggression_scores = np.array(aggression_scores)
 
     # Discretize into buckets
