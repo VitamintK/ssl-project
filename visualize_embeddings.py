@@ -188,7 +188,7 @@ def compute_color_values(
     return np.arange(num_samples), "Sample Index", "viridis"
 
 
-def visualize_embeddings_tsne(
+def visualize_embeddings(
     embeddings: np.ndarray,
     policies: list[Policy],
     game: pyspiel.Game,
@@ -629,7 +629,7 @@ if __name__ == "__main__":
         opponent_pool=opponent_pool,
     )
 
-    visualize_embeddings_tsne(
+    visualize_embeddings(
         embeddings=embeddings,
         policies=policies,
         game=game,
