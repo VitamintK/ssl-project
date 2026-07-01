@@ -422,7 +422,7 @@ def visualize_multiple_checkpoints(
 
 
 def _build_neupl_inputs(
-    game_name: str, num_policies: int, device: str
+    game_name: str, num_policies: int, device: str, neupl_directory: Optional[str] = None
 ) -> tuple[list[Policy], Optional[list[PPOAgent]], np.ndarray]:
     neupl_config = {
         "hidden_size": 256,
@@ -433,6 +433,7 @@ def _build_neupl_inputs(
         game_short_name=game_name,
         neupl_config=neupl_config,
         num_policies_to_make=num_policies,
+        directory=neupl_directory,
         interpolate_prenorm=True,
         sampling_mode="gaussian",
         device=device,
@@ -501,6 +502,7 @@ def build_policies_and_embeddings(
     checkpoint_path: Optional[str] = None,
     agents: Optional[list[PPOAgent]] = None,
     opponent_pool: Optional[list[PPOAgent]] = None,
+    neupl_directory: Optional[str] = None,
 ) -> tuple[list[Policy], Optional[list[PPOAgent]], np.ndarray]:
     """
     Build (policies, agents, embeddings) for `encoder_type`.
@@ -508,9 +510,15 @@ def build_policies_and_embeddings(
     `agents` in the return value is None for encoder types (currently just
     neupl) whose policies aren't backed by a standalone PPOAgent -- this
     disables color_by="exploitability" for those types.
+
+    `neupl_directory` selects which NEUPL training run to load from
+    (`results/test/neupl/ppo/hs{hidden_size}/{game}/<neupl_directory>`). If
+    omitted, NEUPL falls back to an interactive prompt (see
+    `psro.select_neupl_directory`) -- pass this explicitly for any
+    non-interactive/scripted run.
     """
     if encoder_type == "neupl":
-        return _build_neupl_inputs(game.get_type().short_name, num_agents, device)
+        return _build_neupl_inputs(game.get_type().short_name, num_agents, device, neupl_directory)
     if encoder_type == "identity":
         return _build_identity_inputs(game, num_agents, agents)
     if encoder_type in ("weight_autoencoder", "functional_autoencoder"):
@@ -571,6 +579,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--psro-hidden-size", type=int, default=256)
     parser.add_argument("--psro-player-id", type=int, default=None)
+    parser.add_argument(
+        "--neupl-directory",
+        type=str,
+        default=None,
+        help="NEUPL run directory name under results/test/neupl/ppo/hs{size}/{game}/. "
+        "Only applies to --encoder-type=neupl. If omitted, falls back to an "
+        "interactive prompt -- pass this explicitly for non-interactive runs.",
+    )
     return parser.parse_args()
 
 
@@ -609,6 +625,7 @@ if __name__ == "__main__":
         device=device,
         checkpoint_path=args.checkpoint,
         agents=agents,
+        neupl_directory=args.neupl_directory,
         opponent_pool=opponent_pool,
     )
 
