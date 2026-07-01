@@ -1,496 +1,329 @@
 """
-Visualize embeddings using t-SNE dimensionality reduction.
+Visualize policy encoder embeddings using t-SNE or PCA dimensionality reduction.
 
-This script provides flexible visualization of embeddings from any source:
-- Pre-computed embeddings (numpy arrays)
-- Custom encoder functions with arbitrary items
-- Legacy trajectory encoder mode for backward compatibility
-
-The embeddings are visualized in 2D using t-SNE for exploration and analysis.
+Supports all 5 encoder types described in CLAUDE.md: neupl, identity,
+weight_autoencoder, functional_autoencoder, trajectory_encoder. Run as a
+CLI; see `parse_args` for all options, or `python visualize_embeddings.py --help`.
 """
 
+import argparse
 import logging
+import sys
 from pathlib import Path
 from typing import Literal, Optional
-import argparse
 
 import numpy as np
 import pyspiel
 import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from open_spiel.python import policy as policy_lib
 from open_spiel.python.policy import Policy
+from open_spiel.python.algorithms import exploitability as expl_lib
 
 from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
-from main import get_policies_and_embeddings
-from psro import load_ppo_agents_from_neupl, make_neupl_policies
-from utils import make_diverse_random_kuhn_poker_layer_init, get_device_string, PPOAgentPolicy, get_expected_payoffs_agent
 from downstream import set_seed
+from psro import make_neupl_policies, load_ppo_agents_from_psro
+from functional_autoencoder import FunctionalEncoderAdapter
+from test_weight_encoder import load_weight_encoder_from_checkpoint
+from test_functional_encoder import load_functional_encoder_from_checkpoint
 from test_trajectory_encoder import load_trajectory_encoder_from_checkpoint
 from trajectory_encoder import TrajectoryEncoderConfig  # needed for unpickling checkpoint
-from open_spiel.python.algorithms import exploitability as expl_lib
-from psro import load_ppo_agents_from_psro
+from utils import (
+    make_diverse_random_kuhn_poker_layer_init,
+    get_device_string,
+    PPOAgentPolicy,
+    get_expected_payoffs,
+)
+from weight_autoencoder import ppo_agent_to_vector
 
-# Inject TrajectoryEncoderConfig into __main__ for unpickling checkpoints saved from __main__
-import sys
+# Checkpoints saved from a __main__ script need this to unpickle.
 sys.modules['__main__'].TrajectoryEncoderConfig = TrajectoryEncoderConfig
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+logger.addHandler(logging.StreamHandler())
 
-def compute_aggression(game: pyspiel.Game, agent: PPOAgent) -> float:
+
+PPO_AGENT_HIDDEN_SIZE = 256
+
+ENCODER_TYPES = (
+    "neupl",
+    "identity",
+    "weight_autoencoder",
+    "functional_autoencoder",
+    "trajectory_encoder",
+)
+
+# Which action index is "aggressive" (bet/raise) per game, for compute_aggression.
+AGGRESSIVE_ACTION = {
+    "kuhn_poker": 1,   # Bet
+    "leduc_poker": 2,  # Raise
+}
+
+
+def _make_random_agents(
+    game: pyspiel.Game, num_agents: int, hidden_size: int = PPO_AGENT_HIDDEN_SIZE
+) -> list[PPOAgent]:
+    """Generate `num_agents` randomly initialized PPOAgents for `game`."""
+    info_state_size = game.information_state_tensor_shape()
+    num_actions = game.num_distinct_actions()
+    layer_init = make_diverse_random_kuhn_poker_layer_init(game)
+    return [
+        PPOAgent(num_actions, info_state_size, "cpu", layer_init, hidden_size)
+        for _ in range(num_agents)
+    ]
+
+
+def compute_aggression(game: pyspiel.Game, policy: Policy) -> float:
     """
-    Compute aggression score of a PPOAgent.
+    Compute the exact aggression score of a policy via full game-tree traversal.
 
-    Aggression is the average probability of taking aggressive actions (bet/raise)
-    across all information states where the agent can act.
-
-    Args:
-        game: OpenSpiel game instance
-        agent: PPOAgent to evaluate
-
-    Returns:
-        Aggression score between 0 and 1 (higher = more aggressive)
+    Aggression is the average probability of taking the game's aggressive
+    action (bet/raise) across all information states where `policy`'s
+    player (assumed to be player 0) can act.
     """
     game_name = game.get_type().short_name
+    if game_name not in AGGRESSIVE_ACTION:
+        raise ValueError(f"Aggression not defined for game: {game_name}")
+    aggressive_action = AGGRESSIVE_ACTION[game_name]
 
-    # Determine which action is aggressive
-    if game_name == "kuhn_poker":
-        aggressive_action = 1  # Bet
-    elif game_name == "leduc_poker":
-        aggressive_action = 2  # Raise
-    else:
-        raise ValueError(f"Unknown game: {game_name}")
+    aggression_values: list[float] = []
 
-    policy = PPOAgentPolicy(game, agent, player_id=0, use_observation=False)
-
-    # Collect aggression across all info states via game tree traversal
-    aggression_values = []
-
-    def traverse(state):
+    def traverse(state: pyspiel.State) -> None:
         if state.is_terminal():
             return
-
         if state.is_chance_node():
             for action, _ in state.chance_outcomes():
-                child = state.child(action)
-                traverse(child)
-        else:
-            current_player = state.current_player()
+                traverse(state.child(action))
+            return
 
-            # Get action probs for player 0 (our agent)
-            if current_player == 0:
-                action_probs = policy.action_probabilities(state, current_player)
-                if aggressive_action in action_probs:
-                    aggression_values.append(action_probs[aggressive_action])
+        current_player = state.current_player()
+        if current_player == 0:
+            action_probs = policy.action_probabilities(state, current_player)
+            if aggressive_action in action_probs:
+                aggression_values.append(action_probs[aggressive_action])
 
-            # Continue traversal
-            for action in state.legal_actions():
-                child = state.child(action)
-                traverse(child)
+        for action in state.legal_actions():
+            traverse(state.child(action))
 
     traverse(game.new_initial_state())
-
-    if not aggression_values:
-        return 0.0
-    return np.mean(aggression_values)
+    return float(np.mean(aggression_values)) if aggression_values else 0.0
 
 
 def compute_exploitability(game: pyspiel.Game, agent: PPOAgent) -> float:
     """
-    Compute exploitability of a PPOAgent in a given game.
-
-    For 2-player games, creates a joint policy where the agent plays both positions
-    and computes how much it can be exploited by a best response.
-
-    Args:
-        game: OpenSpiel game instance
-        agent: PPOAgent to evaluate
-
-    Returns:
-        Exploitability value (lower is better, 0 = Nash equilibrium)
+    Exploitability of a PPOAgent playing both seats of a 2-player game
+    (0 = Nash equilibrium; lower is better). Needs a raw PPOAgent (not just
+    a Policy) because it must wrap the same weights for both player seats.
     """
-    # Create policies for both player positions
     policy_p0 = PPOAgentPolicy(game, agent, player_id=0, use_observation=False)
     policy_p1 = PPOAgentPolicy(game, agent, player_id=1, use_observation=False)
 
-    # Create a joint tabular policy
     class JointPolicy:
-        """Wrapper that routes to the appropriate player's policy."""
+        """Routes each seat to that seat's PPOAgentPolicy wrapper."""
+
         def action_probabilities(self, state, player_id=None):
             if player_id is None:
                 player_id = state.current_player()
-            if player_id == 0:
-                return policy_p0.action_probabilities(state, player_id)
-            else:
-                return policy_p1.action_probabilities(state, player_id)
+            return (policy_p0 if player_id == 0 else policy_p1).action_probabilities(
+                state, player_id
+            )
 
-    joint_policy = JointPolicy()
-
-    # Compute exploitability
-    return expl_lib.exploitability(game, joint_policy)
+    return expl_lib.exploitability(game, JointPolicy())
 
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler()
-handler.setFormatter(logging.Formatter('%(message)s'))
-logger.addHandler(handler)
-
-
-def calculate_aggressiveness(
-    policy: Policy,
-    game: pyspiel.Game,
-    player: int,
-    num_episodes: int = 100,
-) -> float:
+def compute_color_values(
+    color_by: Literal["index", "aggression", "exploitability", "ev_vs_random"],
+    game: Optional[pyspiel.Game],
+    policies: Optional[list[Policy]],
+    agents: Optional[list[PPOAgent]],
+    num_samples: int,
+) -> tuple[np.ndarray, str, str]:
     """
-    Calculate how aggressive a policy is by measuring its tendency to take
-    aggressive actions against a uniform random opponent.
+    Compute the per-sample scalar used to color the embedding scatter plot.
 
-    For Kuhn Poker: action 0 = passive (pass/call), action 1 = aggressive (bet/raise)
-    For Leduc Poker: action 2 = aggressive (raise), others = passive (fold/call)
-
-    Args:
-        policy: The OpenSpiel Policy to evaluate
-        game: OpenSpiel game instance
-        player: Which player position to evaluate (0 or 1)
-        num_episodes: Number of episodes to run for evaluation
-
-    Returns:
-        Aggressiveness score between 0 and 1 (proportion of aggressive actions)
+    Returns (color_values, color_label, colormap_name). This is the single
+    place coloring is computed -- callers no longer need to pick between
+    two different aggression implementations.
     """
-    game_short_name = game.get_type().short_name
+    if color_by == "aggression":
+        if policies is None or game is None:
+            raise ValueError("color_by='aggression' requires `policies` and `game`.")
+        logger.info(f"\nComputing aggression for {len(policies)} policies...")
+        values = np.array([compute_aggression(game, p) for p in policies])
+        logger.info(
+            f"Aggression stats: min={values.min():.4f}, max={values.max():.4f}, "
+            f"mean={values.mean():.4f}"
+        )
+        return values, "Aggression (Bet/Raise Freq)", "coolwarm"
 
-    # Determine aggressive action(s) based on game
-    if game_short_name == "kuhn_poker":
-        aggressive_actions = {1}  # Bet/raise
-    elif game_short_name == "leduc_poker":
-        aggressive_actions = {2}  # Raise
-    else:
-        raise ValueError(f"Aggressiveness not defined for game: {game_short_name}")
+    if color_by == "exploitability":
+        if agents is None or game is None:
+            raise ValueError(
+                "color_by='exploitability' requires raw `agents` (not just policies) "
+                "and `game`. This encoder type/mode may not provide raw agents "
+                "(e.g. neupl policies aren't backed by a standalone PPOAgent)."
+            )
+        logger.info(f"\nComputing exploitability for {len(agents)} agents...")
+        values = np.array([compute_exploitability(game, a) for a in agents])
+        logger.info(
+            f"Exploitability stats: min={values.min():.4f}, max={values.max():.4f}, "
+            f"mean={values.mean():.4f}"
+        )
+        return values, "Exploitability", "plasma"
 
-    # Create uniform random opponent
-    opponent_policy = policy_lib.UniformRandomPolicy(game)
+    if color_by == "ev_vs_random":
+        if policies is None or game is None:
+            raise ValueError("color_by='ev_vs_random' requires `policies` and `game`.")
+        logger.info(f"\nComputing EV vs uniform random for {len(policies)} policies...")
+        uniform_random = policy_lib.UniformRandomPolicy(game)
+        values = np.array([get_expected_payoffs(game, p, uniform_random) for p in policies])
+        logger.info(
+            f"EV stats: min={values.min():.4f}, max={values.max():.4f}, "
+            f"mean={values.mean():.4f}"
+        )
+        return values, "EV vs Uniform Random", "RdYlGn"
 
-    # Track aggressive actions
-    aggressive_count = 0
-    total_actions = 0
-
-    for _ in range(num_episodes):
-        state = game.new_initial_state()
-
-        while not state.is_terminal():
-            if state.is_chance_node():
-                # Chance node: sample random outcome
-                outcomes, probs = zip(*state.chance_outcomes())
-                action = np.random.choice(outcomes, p=probs)
-                state.apply_action(action)
-            else:
-                # Player node
-                current_player = state.current_player()
-
-                # Get policy for current player
-                if current_player == player:
-                    current_policy = policy
-                else:
-                    current_policy = opponent_policy
-
-                # Get action probabilities from policy
-                action_probs = current_policy.action_probabilities(state)
-                actions = list(action_probs.keys())
-                probs = np.array(list(action_probs.values())) # if we don't convert to array, random choice complains that probs don't sum to 1?
-                action = np.random.choice(actions, p=probs)
-
-                # Track aggressive actions for the specified player
-                if current_player == player:
-                    total_actions += 1
-                    if action in aggressive_actions:
-                        aggressive_count += 1
-
-                state.apply_action(action)
-
-    # Return proportion of aggressive actions
-    return aggressive_count / total_actions if total_actions > 0 else 0.0
+    return np.arange(num_samples), "Sample Index", "viridis"
 
 
 def visualize_embeddings_tsne(
-    embeddings: Optional[np.ndarray] = None,
-    policies: Optional[list[Policy]] = None,
-    checkpoint_path: Optional[str] = None,
-    game: Optional[pyspiel.Game] = None,
-    num_agents: int = 500,
+    embeddings: np.ndarray,
+    policies: list[Policy],
+    game: pyspiel.Game,
     agents: Optional[list[PPOAgent]] = None,
-    opponent_pool: Optional[list[PPOAgent]] = None,
-    device: str = "cpu",
+    game_short_name: Optional[str] = None,
     seed: int = 42,
     perplexity: int = 30,
     save_path: Optional[str] = None,
-    title_suffix: str = "",
     filename_suffix: str = "",
-    aggressiveness_episodes: int = 100,
-    color_by: str = "index",
+    title_suffix: str = "",
+    color_by: Literal["index", "aggression", "exploitability", "ev_vs_random"] = "index",
     agent_label: str = "Random",
+    reduction_method: Literal["tsne", "pca"] = "tsne",
 ):
     """
-    Visualize embeddings using t-SNE dimensionality reduction.
-
-    This function supports two modes of operation:
-    1. Direct embeddings: Pass pre-computed embeddings via `embeddings` parameter
-       (optionally with `policies` for aggressiveness coloring)
-    2. Trajectory encoder: Pass `checkpoint_path` and `game` for legacy trajectory encoder mode
+    Reduce `embeddings` to 2D with t-SNE or PCA, color by `color_by`, plot, and save.
 
     Args:
-        embeddings: Pre-computed embeddings array of shape (n_samples, embedding_dim)
-        policies: Optional list of Policy objects corresponding to embeddings (for aggressiveness)
-        checkpoint_path: Path to encoder checkpoint (legacy trajectory encoder mode)
-        game: OpenSpiel game instance (used with checkpoint_path or for aggressiveness)
-        num_agents: Number of random agents to generate (only for trajectory encoder mode)
-        agents: Optional list of agents to visualize (if None, generates random agents)
-        opponent_pool: Optional opponent pool (only for trajectory encoder mode)
-        device: Device to run on
-        seed: Random seed for reproducibility
-        perplexity: t-SNE perplexity parameter (typically 5-50)
-        save_path: Optional path to save the plot
-        title_suffix: Additional text to append to the plot title
-        filename_suffix: Additional text to append to the filename
-        aggressiveness_episodes: Number of episodes for aggressiveness calculation
-        color_by: What to color points by - 'index', 'exploitability', 'ev_vs_random', or 'aggression'
-        agent_label: Label for the agents (e.g., 'Random', 'PSRO') used in plot title
+        embeddings: Embeddings array of shape (n_samples, embedding_dim).
+        policies: Policy objects parallel to `embeddings`, used for coloring.
+        game: OpenSpiel game instance the policies/agents act in.
+        agents: Raw PPOAgents parallel to `embeddings`, if available. Required
+            for color_by="exploitability"; not available for encoder types
+            (e.g. neupl) whose policies aren't backed by a standalone PPOAgent.
+        game_short_name: Overrides the filename/log label (defaults to `game`'s name).
+        seed: Random seed for reproducibility.
+        perplexity: t-SNE perplexity (ignored when reduction_method='pca').
+        save_path: Optional explicit path to save the plot; otherwise a default
+            path under results/visualizations/ is derived from the other args.
+        filename_suffix: Extra text appended to auto-derived filenames.
+        title_suffix: Extra text appended to the plot title in parentheses.
+        color_by: What to color points by -- 'index', 'exploitability',
+            'ev_vs_random', or 'aggression'.
+        agent_label: Label for the agents (e.g. 'Random', 'PSRO') in the plot title.
+        reduction_method: 'tsne' or 'pca'.
+
+    Returns:
+        (embeddings, embeddings_2d, fig, color_values)
     """
     set_seed(seed)
+    embeddings = np.asarray(embeddings)
+    num_samples = len(embeddings)
+    game_short_name = game_short_name or game.get_type().short_name
+
     logger.info(f"Set random seed to {seed}")
-    logger.info(f"Using device: {device}")
-    logger.info(f"Color by: {color_by}")
+    logger.info(f"Reduction method: {reduction_method}, color by: {color_by}")
+    logger.info(f"Using {num_samples} embeddings of shape {embeddings.shape}")
 
-    # Determine the mode and get embeddings
-    policies_list = None  # Track policies for aggressiveness calculation
-
-    if embeddings is not None:
-        # Mode 1: Direct embeddings provided
-        embeddings = np.array(embeddings)
-        logger.info(f"Using provided embeddings of shape {embeddings.shape}")
-        num_samples = len(embeddings)
-        game_short_name = "custom"
-        policies_list = policies
-    elif checkpoint_path is not None and game is not None:
-        # Mode 2: Trajectory encoder mode
-        game_short_name = game.get_type().short_name
-        info_state_size = game.information_state_tensor_shape()
-        num_actions = game.num_distinct_actions()
-
-        # Load pre-trained encoder
-        logger.info(f"\nLoading pre-trained encoder from {checkpoint_path}...")
-        _, adapter, _ = load_trajectory_encoder_from_checkpoint(
-            checkpoint_path,
-            game,
-            policies=opponent_pool,
-            device=device
-        )
-
-        # Use provided agents or create random ones
-        if agents is not None:
-            logger.info(f"\nUsing {len(agents)} provided agents...")
-            num_agents = len(agents)
-        else:
-            logger.info(f"\nGenerating {num_agents} random agents...")
-            PPO_AGENT_HIDDEN_SIZE = 256
-            layer_init = make_diverse_random_kuhn_poker_layer_init(game)
-            agents = [
-                PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE)
-                for _ in range(num_agents)
-            ]
-
-        # Encode agents
-        logger.info("Encoding agents to embedding space...")
-        encoder_fn_local = adapter.get_encoder(device=device)
-        embeddings = []
-
-        for i, agent in enumerate(agents):
-            if (i + 1) % 100 == 0:
-                logger.info(f"  Encoded {i + 1}/{num_agents} agents")
-            embedding = encoder_fn_local(agent).detach().cpu().numpy()
-            embeddings.append(embedding)
-
-        embeddings = np.array(embeddings)
-        num_samples = num_agents
-        policies_list = agents
-        logger.info(f"Embeddings shape: {embeddings.shape}")
-    else:
-        raise ValueError(
-            "Must provide either:\n"
-            "  1. 'embeddings' (pre-computed), or\n"
-            "  2. 'checkpoint_path' and 'game' (legacy trajectory encoder mode)"
-        )
-
-    # Calculate aggressiveness for coloring if we have policies and a game
-    color_values = None
-    color_label = "Sample Index"
-
-    if policies_list is not None and game is not None:
-        # Check if policies_list contains PPOAgent instances
-        if policies_list and isinstance(policies_list[0], PPOAgent):
-            logger.info(f"\nCalculating aggressiveness for {len(policies_list)} agents...")
-            aggressiveness_scores = []
-            for i, agent in enumerate(policies_list):
-                if (i + 1) % 100 == 0:
-                    logger.info(f"  Calculated aggressiveness for {i + 1}/{len(policies_list)} agents")
-                # Wrap PPOAgent as OpenSpiel Policy
-                agent_policy = PPOAgentPolicy(game, agent, player_id=0, use_observation=False)
-                score = calculate_aggressiveness(agent_policy, game, player=0, num_episodes=aggressiveness_episodes)
-                aggressiveness_scores.append(score)
-
-            color_values = np.array(aggressiveness_scores)
-            color_label = "Aggressiveness"
-            logger.info(f"Aggressiveness range: [{color_values.min():.3f}, {color_values.max():.3f}]")
-        elif policies_list:
-            # Policies are already Policy objects
-            logger.info(f"\nCalculating aggressiveness for {len(policies_list)} policies...")
-            aggressiveness_scores = []
-            for i, policy in enumerate(policies_list):
-                if (i + 1) % 100 == 0:
-                    logger.info(f"  Calculated aggressiveness for {i + 1}/{len(policies_list)} policies")
-                score = calculate_aggressiveness(policy, game, player=0, num_episodes=aggressiveness_episodes)
-                aggressiveness_scores.append(score)
-
-            color_values = np.array(aggressiveness_scores)
-            color_label = "Aggressiveness"
-            logger.info(f"Aggressiveness range: [{color_values.min():.3f}, {color_values.max():.3f}]")
-
-    # Default to sample index if no aggressiveness calculated
-    if color_values is None:
-        color_values = np.arange(num_samples)
-        color_label = "Sample Index"
-
-    # Compute color values based on color_by parameter
-    if color_by == "exploitability":
-        logger.info("\nComputing exploitability for each agent...")
-        color_values = []
-        for i, agent in enumerate(agents):
-            if (i + 1) % 50 == 0:
-                logger.info(f"  Computed exploitability for {i + 1}/{num_agents} agents")
-            expl = compute_exploitability(game, agent)
-            color_values.append(expl)
-        color_values = np.array(color_values)
-        color_label = "Exploitability"
-        cmap = "plasma"  # Use plasma for exploitability (yellow=high/bad, purple=low/good)
-        logger.info(f"Exploitability stats: min={color_values.min():.4f}, max={color_values.max():.4f}, mean={color_values.mean():.4f}")
-    elif color_by == "ev_vs_random":
-        logger.info("\nComputing EV against uniform random for each agent...")
-        uniform_random = policy_lib.UniformRandomPolicy(game)
-        color_values = []
-        for i, agent in enumerate(agents):
-            if (i + 1) % 50 == 0:
-                logger.info(f"  Computed EV for {i + 1}/{num_agents} agents")
-            ev = get_expected_payoffs_agent(game, agent, uniform_random)
-            color_values.append(ev)
-        color_values = np.array(color_values)
-        color_label = "EV vs Uniform Random"
-        cmap = "RdYlGn"  # Red=negative, Yellow=neutral, Green=positive
-        logger.info(f"EV stats: min={color_values.min():.4f}, max={color_values.max():.4f}, mean={color_values.mean():.4f}")
-    elif color_by == "aggression":
-        logger.info("\nComputing aggression score for each agent...")
-        color_values = []
-        for i, agent in enumerate(agents):
-            if (i + 1) % 50 == 0:
-                logger.info(f"  Computed aggression for {i + 1}/{num_agents} agents")
-            agg = compute_aggression(game, agent)
-            color_values.append(agg)
-        color_values = np.array(color_values)
-        color_label = "Aggression (Bet/Raise Freq)"
-        cmap = "coolwarm"  # Blue=passive, Red=aggressive
-        logger.info(f"Aggression stats: min={color_values.min():.4f}, max={color_values.max():.4f}, mean={color_values.mean():.4f}")
-    else:
-        color_values = np.arange(num_agents)
-        color_label = "Agent Index"
-        cmap = "viridis"
-
-    # Apply t-SNE
-    logger.info(f"\nApplying t-SNE with perplexity={perplexity}...")
-    tsne = TSNE(
-        n_components=2,
-        perplexity=perplexity,
-        random_state=seed,
-        max_iter=2000,
-        verbose=1
+    color_values, color_label, cmap = compute_color_values(
+        color_by, game, policies, agents, num_samples
     )
-    embeddings_2d = tsne.fit_transform(embeddings)
 
-    # Create visualization
+    if reduction_method == "pca":
+        logger.info("\nApplying PCA...")
+        reducer = PCA(n_components=2, random_state=seed)
+        embeddings_2d = reducer.fit_transform(embeddings)
+        explained = reducer.explained_variance_ratio_
+        logger.info(
+            f"PCA explained variance: PC1={explained[0]:.3f}, PC2={explained[1]:.3f} "
+            f"(total={sum(explained):.3f})"
+        )
+        dim_labels = (f"PC1 ({explained[0]*100:.1f}%)", f"PC2 ({explained[1]*100:.1f}%)")
+    else:
+        logger.info(f"\nApplying t-SNE with perplexity={perplexity}...")
+        reducer = TSNE(
+            n_components=2,
+            perplexity=perplexity,
+            random_state=seed,
+            max_iter=2000,
+            learning_rate=200,
+            verbose=1,
+        )
+        embeddings_2d = reducer.fit_transform(embeddings)
+        dim_labels = ("", "")
+
     logger.info("\nCreating visualization...")
     fig, ax = plt.subplots(figsize=(10, 8))
-
-    # Scatter plot with a color gradient
     scatter = ax.scatter(
         embeddings_2d[:, 0],
         embeddings_2d[:, 1],
         c=color_values,
         cmap=cmap,
         alpha=0.6,
-        s=20
+        s=20,
     )
-
-    ax.set_xlabel('t-SNE Dimension 1', fontsize=16)
-    ax.set_ylabel('t-SNE Dimension 2', fontsize=16)
-    ax.tick_params(axis='both', labelsize=12)
-
-    # Build title based on mode
-    if title_suffix:
-        title = f't-SNE Visualization of Embeddings\n{title_suffix}'
-    else:
-        color_title_suffix = f" (colored by {color_by})" if color_by != "index" else ""
-        title = (
-            f't-SNE Visualization of Embeddings\n'
-            f'{game_short_name.replace("_", " ").title()} - {num_samples} Samples{color_title_suffix}'
-        )
-    ax.set_title(title, fontsize=14)
+    ax.set_xlabel(dim_labels[0])
+    ax.set_ylabel(dim_labels[1])
+    if not dim_labels[0]:
+        ax.tick_params(axis="both", labelbottom=False, labelleft=False)
     ax.grid(True, alpha=0.3)
 
-    # Add colorbar
-    cbar = plt.colorbar(scatter, ax=ax)
-    cbar.set_label(color_label, fontsize=14)
-    cbar.ax.tick_params(labelsize=12)
+    title = f"{agent_label} agents -- {game_short_name}"
+    if title_suffix:
+        title += f" ({title_suffix})"
+    ax.set_title(title)
 
+    cbar = plt.colorbar(scatter, ax=ax)
+    cbar.set_label(color_label, fontsize=20)
+    cbar.ax.tick_params(labelsize=16)
     plt.tight_layout()
 
-    # Save plot
     viz_dir = Path("results") / "visualizations"
     viz_dir.mkdir(parents=True, exist_ok=True)
     color_suffix = f"_{color_by}" if color_by != "index" else ""
-
     agent_suffix = f"_{agent_label.lower()}" if agent_label != "Random" else ""
+
     if save_path:
-        # Ensure directory exists
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
         logger.info(f"Saved plot to {save_path}")
     else:
-        # Default save path
-        filename = f"tsne_{game_short_name}_{num_samples}_samples{agent_suffix}{color_suffix}{filename_suffix}"
-        plt.savefig(viz_dir / f"{filename}.png", dpi=300, bbox_inches='tight')
-        plt.savefig(viz_dir / f"{filename}.pdf", bbox_inches='tight')
+        filename = (
+            f"{reduction_method}_{game_short_name}_{num_samples}_samples"
+            f"{agent_suffix}{color_suffix}{filename_suffix}"
+        )
+        plt.savefig(viz_dir / f"{filename}.png", dpi=300, bbox_inches="tight")
+        plt.savefig(viz_dir / f"{filename}.pdf", bbox_inches="tight")
         logger.info(f"Saved plots to {viz_dir / filename}.[png|pdf]")
 
-    # Also save embeddings for future analysis
     embeddings_filename = f"embeddings_{game_short_name}_{num_samples}_samples{filename_suffix}.npz"
-    embeddings_path = Path(save_path).parent / embeddings_filename if save_path else viz_dir / embeddings_filename
-
-    save_dict = {
-        'embeddings_high_dim': embeddings,
-        'embeddings_2d': embeddings_2d,
-        'checkpoint_path': checkpoint_path if checkpoint_path else "N/A",
-        'num_samples': num_samples,
-        'seed': seed,
-        'perplexity': perplexity,
-        'color_by': color_by,
-        'color_values': color_values,
-        'color_label': color_label,
-    }
-
-    # Add aggressiveness scores if calculated
-    if color_label == "Aggressiveness":
-        save_dict['aggressiveness_scores'] = color_values
-
-
-    np.savez(embeddings_path, **save_dict)
+    embeddings_path = (
+        Path(save_path).parent / embeddings_filename if save_path else viz_dir / embeddings_filename
+    )
+    np.savez(
+        embeddings_path,
+        embeddings_high_dim=embeddings,
+        embeddings_2d=embeddings_2d,
+        num_samples=num_samples,
+        seed=seed,
+        perplexity=perplexity,
+        reduction_method=reduction_method,
+        color_by=color_by,
+        color_values=color_values,
+        color_label=color_label,
+    )
     logger.info(f"Saved embeddings to {embeddings_path}")
 
     return embeddings, embeddings_2d, fig, color_values
@@ -506,7 +339,7 @@ def visualize_multiple_checkpoints(
     save_path: Optional[str] = None,
 ):
     """
-    Compare embeddings from multiple checkpoints side-by-side.
+    Compare embeddings from multiple trajectory-encoder checkpoints side-by-side.
 
     Args:
         checkpoint_paths: List of paths to trajectory encoder checkpoints
@@ -523,17 +356,13 @@ def visualize_multiple_checkpoints(
     info_state_size = game.information_state_tensor_shape()
     num_actions = game.num_distinct_actions()
 
-    # Create shared random agents
     logger.info(f"\nGenerating {num_agents} random agents (shared across all checkpoints)...")
-    PPO_AGENT_HIDDEN_SIZE = 256
     layer_init = make_diverse_random_kuhn_poker_layer_init(game)
-
     agents = [
-        PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE)
+        PPOAgent(num_actions, info_state_size, "cpu", layer_init, PPO_AGENT_HIDDEN_SIZE)
         for _ in range(num_agents)
     ]
 
-    # Create subplots
     n_checkpoints = len(checkpoint_paths)
     fig, axes = plt.subplots(1, n_checkpoints, figsize=(6 * n_checkpoints, 5))
     if n_checkpoints == 1:
@@ -544,14 +373,8 @@ def visualize_multiple_checkpoints(
         logger.info(f"Processing checkpoint {idx+1}/{n_checkpoints}: {label}")
         logger.info(f"{'='*80}")
 
-        # Load encoder
-        _, adapter, _ = load_trajectory_encoder_from_checkpoint(
-            checkpoint_path,
-            game,
-            device=device
-        )
+        _, adapter, _ = load_trajectory_encoder_from_checkpoint(checkpoint_path, game, device=device)
 
-        # Encode agents
         logger.info("Encoding agents...")
         encoder_fn = adapter.get_encoder(device=device)
         embeddings = np.array([
@@ -559,171 +382,217 @@ def visualize_multiple_checkpoints(
             for agent in agents
         ])
 
-        # Apply t-SNE
         logger.info("Applying t-SNE...")
         tsne = TSNE(n_components=2, perplexity=30, random_state=seed, max_iter=1000)
         embeddings_2d = tsne.fit_transform(embeddings)
 
-        # Plot
         ax = axes[idx]
-        scatter = ax.scatter(
+        ax.scatter(
             embeddings_2d[:, 0],
             embeddings_2d[:, 1],
             c=range(num_agents),
-            cmap='viridis',
+            cmap="viridis",
             alpha=0.6,
-            s=20
+            s=20,
         )
-        ax.set_xlabel('t-SNE Dim 1', fontsize=14)
-        ax.set_ylabel('t-SNE Dim 2', fontsize=14)
+        ax.set_xlabel("t-SNE Dim 1", fontsize=14)
+        ax.set_ylabel("t-SNE Dim 2", fontsize=14)
         ax.set_title(label, fontsize=16)
-        ax.tick_params(axis='both', labelsize=11)
+        ax.tick_params(axis="both", labelsize=11)
         ax.grid(True, alpha=0.3)
 
     plt.suptitle(
         f't-SNE Comparison: {game_short_name.replace("_", " ").title()}',
         fontsize=16,
-        y=1.02
+        y=1.02,
     )
     plt.tight_layout()
 
-    # Save
     if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
         logger.info(f"\nSaved comparison plot to {save_path}")
     else:
         viz_dir = Path("results") / "visualizations"
         viz_dir.mkdir(parents=True, exist_ok=True)
         default_path = viz_dir / f"tsne_comparison_{game_short_name}.png"
-        plt.savefig(default_path, dpi=300, bbox_inches='tight')
+        plt.savefig(default_path, dpi=300, bbox_inches="tight")
         logger.info(f"\nSaved comparison plot to {default_path}")
 
     return fig
 
-def visualize_wrapper(
-        encoder_type: Literal["neupl", "identity", "weight_autoencoder", "functional_autoencoder"],
-        game_name: str = "kuhn_poker",
-):
-    PERPLEXITY = 40
-    game = pyspiel.load_game(game_name)
-    if encoder_type == "neupl":
-        SAMPLING_MODE = "gaussian"
-        neupl_config = {
-            'hidden_size': 256,
-            'policy_embedding_size': 64,
-            'use_randall_loss': False,
-        }
-        policies_and_embeddings = make_neupl_policies(
-            game_short_name=game_name,
-            neupl_config=neupl_config,
-            original_num_policies=23,
-            num_policies_to_make=1000,
-            interpolate_prenorm=True,
-            sampling_mode=SAMPLING_MODE,
-        )
-        p0_policies_and_embeddings = policies_and_embeddings[0]
-        policies = [pe[1] for pe in p0_policies_and_embeddings]
-        embeddings = [pe[0].detach().cpu().numpy() for pe in p0_policies_and_embeddings]
-        # perplexity = 5
-    elif encoder_type == "identity":
-        p0_policies_and_embeddings = [
-            (np.zeros(64), PPOAgentPolicy(game, PPOAgent(num_actions, info_state_size, 'cpu', layer_init, PPO_AGENT_HIDDEN_SIZE), player_id=0, use_observation=False))
-            for _ in range(1000)
-        ]
-    elif encoder_type == "weight_autoencoder":
-        PLAYER_ID = 0
-        N = 2000 # half for training the encoder, half to be used for visualization
-        device = get_device_string()
-        game_short_name = game.get_type().short_name
-        info_state_size = game.information_state_tensor_shape()
-        num_actions = game.num_distinct_actions()
-        layer_init = make_diverse_random_kuhn_poker_layer_init(game)
-        ppo_agents = [PPOAgent(num_actions, info_state_size, 'cpu', layer_init, 256) for _ in range(N)]
-        policies, embeddings = get_policies_and_embeddings(game, PLAYER_ID, ppo_agents, "ppo random " + game_short_name, game_short_name, device)
-        # perplexity = 30
-        # _, identity_embeddings = get_policies_and_embeddings2(player_id, ppo_agents, "ppo random " + game_short_name, game_short_name, device)
-    elif encoder_type == "functional_autoencoder":
-        N = 2000 # half for training the encoder, half to be used for visualization
-        device = get_device_string()
-        game_short_name = game.get_type().short_name
-        info_state_size = game.information_state_tensor_shape()
-        num_actions = game.num_distinct_actions()
-        layer_init = make_diverse_random_kuhn_poker_layer_init(game)
-        ppo_agents = [PPOAgent(num_actions, info_state_size, 'cpu', layer_init, 256) for _ in range(N)]
-        policies, embeddings = get_policies_and_embeddings(game, PLAYER_ID, ppo_agents, "ppo random " + game_short_name, game_short_name, device)
-    else:
-        raise ValueError(f"Invalid encoder type: {encoder_type}")
-    visualize_embeddings_tsne(
-        embeddings=embeddings,
-        policies=policies,
-        game=game,
-        num_agents=1,
-        opponent_pool=None,
-        device="cpu",
-        seed=42,
-        perplexity=PERPLEXITY,
-        save_path=f"results/visualizations/tsne_{game_name}_{encoder_type}_P{PERPLEXITY}.png",
-        title_suffix=encoder_type,
-        filename_suffix=f"_{encoder_type}",
-        aggressiveness_episodes=100,
+
+def _build_neupl_inputs(
+    game_name: str, num_policies: int, device: str
+) -> tuple[list[Policy], Optional[list[PPOAgent]], np.ndarray]:
+    neupl_config = {
+        "hidden_size": 256,
+        "policy_embedding_size": 64,
+        "use_randall_loss": True,
+    }
+    policies_and_embeddings = make_neupl_policies(
+        game_short_name=game_name,
+        neupl_config=neupl_config,
+        num_policies_to_make=num_policies,
+        interpolate_prenorm=True,
+        sampling_mode="gaussian",
+        device=device,
     )
+    p0_policies_and_embeddings = policies_and_embeddings[0]
+    policies = [pe[1] for pe in p0_policies_and_embeddings]
+    embeddings = np.array([pe[0].detach().cpu().numpy() for pe in p0_policies_and_embeddings])
+    return policies, None, embeddings
+
+
+def _build_identity_inputs(
+    game: pyspiel.Game, num_agents: int, agents: Optional[list[PPOAgent]]
+) -> tuple[list[Policy], list[PPOAgent], np.ndarray]:
+    agents = agents if agents is not None else _make_random_agents(game, num_agents)
+    embeddings = np.array([ppo_agent_to_vector(a).detach().cpu().numpy() for a in agents])
+    policies = [PPOAgentPolicy(game, a, player_id=0, use_observation=False) for a in agents]
+    return policies, agents, embeddings
+
+
+def _build_autoencoder_inputs(
+    game: pyspiel.Game,
+    checkpoint_path: str,
+    encoder_type: Literal["weight_autoencoder", "functional_autoencoder"],
+    device: str,
+    num_agents: int,
+    agents: Optional[list[PPOAgent]],
+) -> tuple[list[Policy], list[PPOAgent], np.ndarray]:
+    if encoder_type == "weight_autoencoder":
+        model, _ = load_weight_encoder_from_checkpoint(checkpoint_path, device=device)
+    else:
+        model, _, _ = load_functional_encoder_from_checkpoint(checkpoint_path, device=device)
+    encoder_fn = FunctionalEncoderAdapter(model, ppo_agent_to_vector).get_encoder(device=device)
+
+    agents = agents if agents is not None else _make_random_agents(game, num_agents)
+    embeddings = np.array([encoder_fn(a).detach().cpu().numpy() for a in agents])
+    policies = [PPOAgentPolicy(game, a, player_id=0, use_observation=False) for a in agents]
+    return policies, agents, embeddings
+
+
+def _build_trajectory_encoder_inputs(
+    game: pyspiel.Game,
+    checkpoint_path: str,
+    device: str,
+    num_agents: int,
+    agents: Optional[list[PPOAgent]],
+    opponent_pool: Optional[list[PPOAgent]],
+) -> tuple[list[Policy], list[PPOAgent], np.ndarray]:
+    _, adapter, _ = load_trajectory_encoder_from_checkpoint(
+        checkpoint_path, game, policies=opponent_pool, device=device
+    )
+    encoder_fn = adapter.get_encoder(device=device)
+
+    agents = agents if agents is not None else _make_random_agents(game, num_agents)
+    embeddings = np.array([encoder_fn(a).detach().cpu().numpy() for a in agents])
+    policies = [PPOAgentPolicy(game, a, player_id=0, use_observation=False) for a in agents]
+    return policies, agents, embeddings
+
+
+def build_policies_and_embeddings(
+    encoder_type: Literal[
+        "neupl", "identity", "weight_autoencoder", "functional_autoencoder", "trajectory_encoder"
+    ],
+    game: pyspiel.Game,
+    num_agents: int,
+    device: str,
+    checkpoint_path: Optional[str] = None,
+    agents: Optional[list[PPOAgent]] = None,
+    opponent_pool: Optional[list[PPOAgent]] = None,
+) -> tuple[list[Policy], Optional[list[PPOAgent]], np.ndarray]:
+    """
+    Build (policies, agents, embeddings) for `encoder_type`.
+
+    `agents` in the return value is None for encoder types (currently just
+    neupl) whose policies aren't backed by a standalone PPOAgent -- this
+    disables color_by="exploitability" for those types.
+    """
+    if encoder_type == "neupl":
+        return _build_neupl_inputs(game.get_type().short_name, num_agents, device)
+    if encoder_type == "identity":
+        return _build_identity_inputs(game, num_agents, agents)
+    if encoder_type in ("weight_autoencoder", "functional_autoencoder"):
+        if checkpoint_path is None:
+            raise ValueError(f"encoder_type='{encoder_type}' requires --checkpoint.")
+        return _build_autoencoder_inputs(game, checkpoint_path, encoder_type, device, num_agents, agents)
+    if encoder_type == "trajectory_encoder":
+        if checkpoint_path is None:
+            raise ValueError("encoder_type='trajectory_encoder' requires --checkpoint.")
+        return _build_trajectory_encoder_inputs(
+            game, checkpoint_path, device, num_agents, agents, opponent_pool
+        )
+    raise ValueError(f"Unknown encoder type: {encoder_type}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Visualize policy encoder embeddings")
+    parser.add_argument(
+        "--encoder-type", type=str, default="trajectory_encoder", choices=list(ENCODER_TYPES)
+    )
+    parser.add_argument(
+        "--game", type=str, default="kuhn_poker", choices=["kuhn_poker", "leduc_poker"]
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Path to encoder checkpoint (required for weight_autoencoder, "
+        "functional_autoencoder, trajectory_encoder)",
+    )
+    parser.add_argument(
+        "--num-agents",
+        type=int,
+        default=500,
+        help="Number of agents/policies to visualize (ignored if --agent-source=psro)",
+    )
+    parser.add_argument(
+        "--perplexity", type=int, default=30, help="t-SNE perplexity (ignored for pca)"
+    )
+    parser.add_argument(
+        "--reduction-method", type=str, default="tsne", choices=["tsne", "pca"]
+    )
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--save-path", type=str, default=None)
+    parser.add_argument(
+        "--color-by",
+        type=str,
+        default="index",
+        choices=["index", "exploitability", "ev_vs_random", "aggression"],
+    )
+    parser.add_argument(
+        "--agent-source",
+        type=str,
+        default="random",
+        choices=["random", "psro"],
+        help="Only applies to identity/weight_autoencoder/functional_autoencoder/trajectory_encoder",
+    )
+    parser.add_argument("--psro-hidden-size", type=int, default=256)
+    parser.add_argument("--psro-player-id", type=int, default=None)
+    return parser.parse_args()
+
 
 if __name__ == "__main__":
-    # visualize_wrapper('weight_autoencoder', game_name='kuhn_poker')
-    visualize_wrapper('neupl', game_name='leduc_poker')
-    exit()
-    parser = argparse.ArgumentParser(description='Visualize trajectory encoder embeddings')
-    parser.add_argument('--game', type=str, default='kuhn_poker',
-                        choices=['kuhn_poker', 'leduc_poker'],
-                        help='Game to use')
-    parser.add_argument('--checkpoint', type=str, required=True,
-                        help='Path to trajectory encoder checkpoint')
-    parser.add_argument('--num-agents', type=int, default=500,
-                        help='Number of random agents to visualize (ignored if --agent-source=psro)')
-    parser.add_argument('--perplexity', type=int, default=30,
-                        help='t-SNE perplexity parameter')
-    parser.add_argument('--seed', type=int, default=42,
-                        help='Random seed')
-    parser.add_argument('--device', type=str, default=None,
-                        help='Device to use (default: auto-detect)')
-    parser.add_argument('--save-path', type=str, default=None,
-                        help='Path to save the plot')
-    parser.add_argument('--color-by', type=str, default='index',
-                        choices=['index', 'exploitability', 'ev_vs_random', 'aggression'],
-                        help='What to color points by (default: index)')
-    # PSRO agent options
-    parser.add_argument('--agent-source', type=str, default='random',
-                        choices=['random', 'psro'],
-                        help='Source of agents to visualize (default: random)')
-    parser.add_argument('--psro-hidden-size', type=int, default=256,
-                        help='Hidden size for PSRO agents (default: 256)')
-    parser.add_argument('--psro-player-id', type=int, default=None,
-                        help='Player ID for PSRO agents (default: None = both players)')
-
-    args = parser.parse_args()
-
-    # Setup
+    args = parse_args()
     device = args.device if args.device else get_device_string()
     game = pyspiel.load_game(args.game)
 
-    logger.info("="*80)
-    logger.info("TRAJECTORY ENCODER EMBEDDING VISUALIZATION")
-    logger.info("="*80)
+    logger.info("=" * 80)
+    logger.info("POLICY EMBEDDING VISUALIZATION")
+    logger.info("=" * 80)
+    logger.info(f"Encoder type: {args.encoder_type}")
     logger.info(f"Game: {args.game}")
-    logger.info(f"Checkpoint: {args.checkpoint}")
     logger.info(f"Agent source: {args.agent_source}")
-    if args.agent_source == 'random':
-        logger.info(f"Number of agents: {args.num_agents}")
-    else:
-        logger.info(f"PSRO hidden size: {args.psro_hidden_size}")
-        logger.info(f"PSRO player ID: {args.psro_player_id}")
-    logger.info(f"Perplexity: {args.perplexity}")
+    logger.info(f"Reduction method: {args.reduction_method}")
     logger.info(f"Device: {device}")
     logger.info(f"Color by: {args.color_by}")
 
-    # Load agents based on source
-    if args.agent_source == 'psro':
-        logger.info(f"\nLoading PSRO agents...")
+    agents = None
+    opponent_pool = None
+    agent_label = "Random"
+    if args.encoder_type != "neupl" and args.agent_source == "psro":
         agents = load_ppo_agents_from_psro(
             game_short_name=args.game,
             player_id=args.psro_player_id,
@@ -731,28 +600,33 @@ if __name__ == "__main__":
             shuffle=True,
         )
         agent_label = "PSRO"
-        # Also use PSRO agents as opponent pool for trajectory generation
         opponent_pool = agents
-    else:
-        agents = None  # Will generate random agents
-        agent_label = "Random"
-        opponent_pool = None  # Use uniform random opponent
 
-    # Visualize
-    embeddings, embeddings_2d, fig, color_values = visualize_embeddings_tsne(
-        checkpoint_path=args.checkpoint,
+    policies, built_agents, embeddings = build_policies_and_embeddings(
+        encoder_type=args.encoder_type,
         game=game,
         num_agents=args.num_agents,
+        device=device,
+        checkpoint_path=args.checkpoint,
         agents=agents,
         opponent_pool=opponent_pool,
-        device=device,
+    )
+
+    visualize_embeddings_tsne(
+        embeddings=embeddings,
+        policies=policies,
+        game=game,
+        agents=built_agents,
         seed=args.seed,
         perplexity=args.perplexity,
         save_path=args.save_path,
+        filename_suffix=f"_{args.encoder_type}",
+        title_suffix=args.encoder_type,
         color_by=args.color_by,
         agent_label=agent_label,
+        reduction_method=args.reduction_method,
     )
 
-    logger.info("\n" + "="*80)
+    logger.info("\n" + "=" * 80)
     logger.info("VISUALIZATION COMPLETE")
-    logger.info("="*80)
+    logger.info("=" * 80)
