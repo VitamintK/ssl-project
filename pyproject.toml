@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "policy-repr"
+version = "0.1.0"
+description = "Learning representations of policies in two-player zero-sum imperfect-information games"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Kevin Wang" },
+    { name = "Kevin Yang" },
+    { name = "Arjun Prakash" },
+    { name = "Amy Greenwald" },
+]
+# Core deps. `open_spiel` and the `iig_rl_benchmark` PPO implementation are
+# installed separately — see the Setup section of the README.
+dependencies = [
+    "torch",
+    "numpy",
+    "scikit-learn",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+viz = ["matplotlib", "seaborn"]
+config = ["omegaconf"]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
