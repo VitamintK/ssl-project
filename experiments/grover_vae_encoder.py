@@ -247,8 +247,8 @@ class TrajectoryReconstructionDataset(Dataset):
     ):
         import sys
         from pathlib import Path
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from trajectory_encoder import collect_trajectory_transitions, normalize_transitions
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+        from policy_repr.encoders.trajectory import collect_trajectory_transitions, normalize_transitions
 
         self.game = game
         self.state_dim = game.information_state_tensor_shape()[0]
@@ -458,8 +458,8 @@ class GroverVAEAdapter:
     def get_encoder(self, device: str = "cpu") -> Callable[[PPOAgent], torch.Tensor]:
         import sys
         from pathlib import Path
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from trajectory_encoder import collect_trajectory_transitions, normalize_transitions
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+        from policy_repr.encoders.trajectory import collect_trajectory_transitions, normalize_transitions
 
         self.model.eval()
         self.model.to(device)

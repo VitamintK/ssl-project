@@ -21,17 +21,17 @@ import torch
 import pyspiel
 from tqdm import tqdm
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
-from utils import PPOAgentPolicy, get_device_string, make_diverse_random_kuhn_poker_layer_init
-from trajectory_encoder import (
+from policy_repr.utils import PPOAgentPolicy, get_device_string, make_diverse_random_kuhn_poker_layer_init
+from policy_repr.encoders.trajectory import (
     TrajectoryEncoderConfig,
     TrajectoryEncoderTrainer,
     TrajectoryEncoderAdapter,
 )
-from grover_implementation import GroverConfig, GroverTrainer, GroverAdapter, GroverModelWrapper
-from agent_identification import (
+from policy_repr.encoders.grover import GroverConfig, GroverTrainer, GroverAdapter, GroverModelWrapper
+from policy_repr.downstream.agent_identification import (
     set_seed, collect_embeddings, evaluate_knn, evaluate_linear_probe,
 )
 
@@ -109,7 +109,7 @@ def evaluate_agent_identification(
     print(f"Agent Identification: {name}")
     print(f"{'='*60}")
 
-    from agent_identification import embed_trajectory
+    from policy_repr.downstream.agent_identification import embed_trajectory
 
     def _collect(agents, n_traj):
         embeddings, labels = [], []
@@ -138,7 +138,7 @@ def evaluate_agent_identification(
 def evaluate_payoff_prediction(name, game, encoder_fn, agents, device):
     """Run Task A: payoff prediction against uniform random."""
     from open_spiel.python import policy as policy_lib
-    from downstream import PayoffPredictor
+    from policy_repr.downstream.heads import PayoffPredictor
 
     print(f"\n{'='*60}")
     print(f"Task A (Payoff Prediction): {name}")
@@ -181,7 +181,7 @@ def evaluate_payoff_prediction(name, game, encoder_fn, agents, device):
 
 def evaluate_pairwise_payoff(name, game, encoder_fn, agents, device):
     """Run Task B: agent vs agent pairwise payoff prediction."""
-    from downstream import PayoffPredictor
+    from policy_repr.downstream.heads import PayoffPredictor
 
     print(f"\n{'='*60}")
     print(f"Task B (Pairwise Payoff Prediction): {name}")
@@ -226,7 +226,7 @@ def evaluate_policy_retrieval(
 ):
     """Run policy retrieval: for each test embedding, find nearest train embeddings."""
     from sklearn.metrics.pairwise import cosine_similarity
-    from agent_identification import embed_trajectory
+    from policy_repr.downstream.agent_identification import embed_trajectory
 
     print(f"\n{'='*60}")
     print(f"Policy Retrieval: {name}")
@@ -270,7 +270,7 @@ def evaluate_strategy_classification(
     opponent_pool, device, num_buckets=5,
 ):
     """Classify policies into aggression buckets using a linear probe on embeddings."""
-    from agent_identification import embed_trajectory
+    from policy_repr.downstream.agent_identification import embed_trajectory
 
     print(f"\n{'='*60}")
     print(f"Strategy Classification: {name}")
@@ -279,8 +279,8 @@ def evaluate_strategy_classification(
     # Import aggression computation
     import sys as _sys
     from pathlib import Path as _Path
-    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
-    from visualize_embeddings import compute_aggression
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "src"))
+    from policy_repr.viz.embeddings import compute_aggression
 
     # Compute aggression for each agent
     print(f"  Computing aggression for {len(agents)} agents...")
@@ -371,7 +371,7 @@ def main():
     layer_init = make_diverse_random_kuhn_poker_layer_init(game)
 
     if args.agent_pool:
-        from generate_agents import load_agents
+        from policy_repr.datasets.generate_agents import load_agents
         print(f"\nLoading agents from {args.agent_pool}...")
         pretrain_agents, eval_agents = load_agents(args.agent_pool, game)
     else:
@@ -394,7 +394,7 @@ def main():
     # --- Train / load contrastive encoder ---
     if args.skip_contrastive and args.contrastive_checkpoint:
         print("\nLoading contrastive encoder from checkpoint...")
-        from test_trajectory_encoder import load_trajectory_encoder_from_checkpoint
+        from policy_repr.encoders.trajectory import load_trajectory_encoder_from_checkpoint
         c_model, c_adapter, c_config = load_trajectory_encoder_from_checkpoint(
             args.contrastive_checkpoint, game, policies=pretrain_agents, device=device,
         )
@@ -409,7 +409,7 @@ def main():
     # --- Train / load Grover encoder ---
     if args.skip_grover and args.grover_checkpoint:
         print("\nLoading Grover encoder from checkpoint...")
-        from grover_implementation import GroverEncoder
+        from policy_repr.encoders.grover import GroverEncoder
         checkpoint = torch.load(args.grover_checkpoint, map_location=device)
         g_config = checkpoint["config"]
         obs_dim = checkpoint["obs_dim"]

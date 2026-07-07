@@ -22,6 +22,9 @@ results/**/old/
 
 outputs/
 
+# SLURM job scripts (cluster-specific, internal use only)
+slurm/
+
 # Test files
 test_downstream_smoke.py
 *.zip
