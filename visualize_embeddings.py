@@ -19,7 +19,9 @@ from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from open_spiel.python import policy as policy_lib
 from open_spiel.python.policy import Policy
-from open_spiel.python.algorithms import exploitability as expl_lib
+from open_spiel.python.algorithms import policy_utils, best_response
+from open_spiel.python.algorithms.psro_v2 import utils as psro_utils
+from pyspiel import TabularBestResponse
 
 from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
 from downstream import set_seed
@@ -111,41 +113,56 @@ def compute_aggression(game: pyspiel.Game, policy: Policy) -> float:
     return float(np.mean(aggression_values)) if aggression_values else 0.0
 
 
-def compute_exploitability(game: pyspiel.Game, agent: PPOAgent) -> float:
+def compute_exploitabilities(
+    game: pyspiel.Game, policies: list[Policy], player_id: int = 0
+) -> np.ndarray:
     """
-    Exploitability of a PPOAgent playing both seats of a 2-player game
-    (0 = Nash equilibrium; lower is better). Needs a raw PPOAgent (not just
-    a Policy) because it must wrap the same weights for both player seats.
+    Best-response exploitability of each policy playing seat `player_id`:
+    the payoff a best-responding opponent achieves in the other seat (higher
+    = more exploitable).
+
+    This is the same definition as Task D's ExploitabilityPredictor
+    (downstream.py) and operates on any OpenSpiel Policy -- including neupl
+    PPONeuplAgentPolicy objects -- so no raw PPOAgent is required. The tabular
+    best-response processor is built once and reused across all policies.
     """
-    policy_p0 = PPOAgentPolicy(game, agent, player_id=0, use_observation=False)
-    policy_p1 = PPOAgentPolicy(game, agent, player_id=1, use_observation=False)
+    best_responder_id = 1 - player_id
+    initial_state = game.new_initial_state()
+    all_states, state_to_info = psro_utils.compute_states_and_info_states_if_none(
+        game, None, None
+    )
+    processor = TabularBestResponse(
+        game,
+        best_responder_id,
+        policy_utils.policy_to_dict(
+            policy_lib.UniformRandomPolicy(game), game, all_states, state_to_info
+        ),
+    )
 
-    class JointPolicy:
-        """Routes each seat to that seat's PPOAgentPolicy wrapper."""
-
-        def action_probabilities(self, state, player_id=None):
-            if player_id is None:
-                player_id = state.current_player()
-            return (policy_p0 if player_id == 0 else policy_p1).action_probabilities(
-                state, player_id
-            )
-
-    return expl_lib.exploitability(game, JointPolicy())
+    values = []
+    for policy in policies:
+        processor.set_policy(
+            policy_utils.policy_to_dict(policy, game, all_states, state_to_info)
+        )
+        best_responder = best_response.CPPBestResponsePolicy(
+            game, best_responder_id, policy, all_states, state_to_info, processor
+        )
+        values.append(best_responder.value(initial_state))
+    return np.array(values)
 
 
 def compute_color_values(
     color_by: Literal["index", "aggression", "exploitability", "ev_vs_random"],
     game: Optional[pyspiel.Game],
     policies: Optional[list[Policy]],
-    agents: Optional[list[PPOAgent]],
     num_samples: int,
 ) -> tuple[np.ndarray, str, str]:
     """
     Compute the per-sample scalar used to color the embedding scatter plot.
 
     Returns (color_values, color_label, colormap_name). This is the single
-    place coloring is computed -- callers no longer need to pick between
-    two different aggression implementations.
+    place coloring is computed, and every metric operates on `policies`, so
+    it works uniformly across all encoder types (including neupl).
     """
     if color_by == "aggression":
         if policies is None or game is None:
@@ -159,19 +176,15 @@ def compute_color_values(
         return values, "Aggression (Bet/Raise Freq)", "coolwarm"
 
     if color_by == "exploitability":
-        if agents is None or game is None:
-            raise ValueError(
-                "color_by='exploitability' requires raw `agents` (not just policies) "
-                "and `game`. This encoder type/mode may not provide raw agents "
-                "(e.g. neupl policies aren't backed by a standalone PPOAgent)."
-            )
-        logger.info(f"\nComputing exploitability for {len(agents)} agents...")
-        values = np.array([compute_exploitability(game, a) for a in agents])
+        if policies is None or game is None:
+            raise ValueError("color_by='exploitability' requires `policies` and `game`.")
+        logger.info(f"\nComputing best-response exploitability for {len(policies)} policies...")
+        values = compute_exploitabilities(game, policies)
         logger.info(
             f"Exploitability stats: min={values.min():.4f}, max={values.max():.4f}, "
             f"mean={values.mean():.4f}"
         )
-        return values, "Exploitability", "plasma"
+        return values, "Exploitability (BR value)", "plasma"
 
     if color_by == "ev_vs_random":
         if policies is None or game is None:
@@ -192,7 +205,6 @@ def visualize_embeddings(
     embeddings: np.ndarray,
     policies: list[Policy],
     game: pyspiel.Game,
-    agents: Optional[list[PPOAgent]] = None,
     game_short_name: Optional[str] = None,
     seed: int = 42,
     perplexity: int = 30,
@@ -209,10 +221,7 @@ def visualize_embeddings(
     Args:
         embeddings: Embeddings array of shape (n_samples, embedding_dim).
         policies: Policy objects parallel to `embeddings`, used for coloring.
-        game: OpenSpiel game instance the policies/agents act in.
-        agents: Raw PPOAgents parallel to `embeddings`, if available. Required
-            for color_by="exploitability"; not available for encoder types
-            (e.g. neupl) whose policies aren't backed by a standalone PPOAgent.
+        game: OpenSpiel game instance the policies act in.
         game_short_name: Overrides the filename/log label (defaults to `game`'s name).
         seed: Random seed for reproducibility.
         perplexity: t-SNE perplexity (ignored when reduction_method='pca').
@@ -238,7 +247,7 @@ def visualize_embeddings(
     logger.info(f"Using {num_samples} embeddings of shape {embeddings.shape}")
 
     color_values, color_label, cmap = compute_color_values(
-        color_by, game, policies, agents, num_samples
+        color_by, game, policies, num_samples
     )
 
     if reduction_method == "pca":
@@ -618,7 +627,7 @@ if __name__ == "__main__":
         agent_label = "PSRO"
         opponent_pool = agents
 
-    policies, built_agents, embeddings = build_policies_and_embeddings(
+    policies, _, embeddings = build_policies_and_embeddings(
         encoder_type=args.encoder_type,
         game=game,
         num_agents=args.num_agents,
@@ -633,7 +642,6 @@ if __name__ == "__main__":
         embeddings=embeddings,
         policies=policies,
         game=game,
-        agents=built_agents,
         seed=args.seed,
         perplexity=args.perplexity,
         save_path=args.save_path,
