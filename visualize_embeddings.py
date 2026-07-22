@@ -169,7 +169,10 @@ def compute_color_values(
         if policies is None or game is None:
             raise ValueError("color_by='aggression' requires `policies` and `game`.")
         logger.info(f"\nComputing aggression for {len(policies)} policies...")
-        values = np.array([compute_aggression(game, p) for p in policies])
+        values = np.array([
+            compute_aggression(game, p)
+            for p in tqdm(policies, desc="Computing aggression")
+        ])
         logger.info(
             f"Aggression stats: min={values.min():.4f}, max={values.max():.4f}, "
             f"mean={values.mean():.4f}"
