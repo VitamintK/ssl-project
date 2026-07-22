@@ -15,6 +15,7 @@ from typing import Literal, Optional
 import numpy as np
 import pyspiel
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from open_spiel.python import policy as policy_lib
@@ -140,7 +141,7 @@ def compute_exploitabilities(
     )
 
     values = []
-    for policy in policies:
+    for policy in tqdm(policies, desc="Computing exploitability"):
         processor.set_policy(
             policy_utils.policy_to_dict(policy, game, all_states, state_to_info)
         )
