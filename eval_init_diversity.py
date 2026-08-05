@@ -19,6 +19,7 @@ Optional sources (via flags):
 import math
 import argparse
 from dataclasses import dataclass
+import random
 from typing import Callable
 
 import numpy as np
@@ -132,13 +133,14 @@ def build_random_init_sources(game, n_agents: int) -> list[PolicySource]:
     return sources
 
 
-def build_psro_source(game) -> PolicySource:
+def build_psro_source(game, n_agents: int) -> PolicySource:
     agents = load_ppo_agents_from_psro(
         game_short_name=game.get_type().short_name,
         player_id=0,
         hidden_size=256,
     )
     policies = [PPOAgentPolicy(game, agent, player_id=0, use_observation=False) for agent in agents]
+    policies = random.sample(policies, 500)
     return PolicySource(key="psro", display_name="PSRO", policies=policies)
 
 
@@ -207,7 +209,7 @@ if __name__ == "__main__":
             compact_keys = {"pytorch_default", "our_method"}
             sources = [s for s in sources if s.key in compact_keys]
     elif args.source == "psro":
-        sources = [build_psro_source(game)]
+        sources = [build_psro_source(game, args.n_agents)]
     elif args.source == "neupl":
         sources = [build_neupl_source(game, args.n_agents)]
 

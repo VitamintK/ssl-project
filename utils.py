@@ -43,11 +43,12 @@ class PPOAgentPolicy(policy.Policy):
             assert player_id == state.current_player()
         player_id = int(player_id)
         legal_actions = state.legal_actions(player_id)
-        legal_action_mask = torch.zeros(self._game.num_distinct_actions())
+        device = next(self._ppo_agent.parameters()).device
+        legal_action_mask = torch.zeros(self._game.num_distinct_actions(), device=device)
         legal_action_mask[legal_actions] = 1
-        info_state = torch.Tensor(state.information_state_tensor(player_id))
+        info_state = torch.tensor(state.information_state_tensor(player_id), dtype=torch.float32, device=device)
         action, log_probs, entropy, value, probs = self._ppo_agent.get_action_and_value(info_state, legal_action_mask)
-        probs = probs.detach().numpy()
+        probs = probs.detach().cpu().numpy()
         prob_dict = {a: probs[a] for a in legal_actions}
         return prob_dict
 
@@ -85,12 +86,13 @@ class PPONeuplAgentPolicy(policy.Policy):
             assert player_id == state.current_player()
         player_id = int(player_id)
         legal_actions = state.legal_actions(player_id)
-        legal_action_mask = torch.zeros(self._game.num_distinct_actions())
+        device = next(self._ppo_agent.parameters()).device
+        legal_action_mask = torch.zeros(self._game.num_distinct_actions(), device=device)
         legal_action_mask[legal_actions] = 1
-        info_state = torch.Tensor(state.information_state_tensor(player_id))
+        info_state = torch.tensor(state.information_state_tensor(player_id), dtype=torch.float32, device=device)
         action, log_probs, entropy, probs = self._ppo_agent.get_action(info_state, embedding=self._embedding, legal_actions_mask=legal_action_mask)
         # first dimension is batch dimension, so we squeeze.
-        probs = probs.detach().numpy().squeeze(0)
+        probs = probs.detach().cpu().numpy().squeeze(0)
         prob_dict = {a: probs[a] for a in legal_actions}
         return prob_dict
 

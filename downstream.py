@@ -931,9 +931,9 @@ class BestResponseLearner:
             config,
             policy_player_id,
             validation_split: float = 0.2,
+            device: str = "cpu",
     ):
-        # self.device = get_device_string()
-        self.device = "cpu"
+        self.device = device
         self.game = game
         self.policies = policies
         if isinstance(embeddings[0], np.ndarray):
@@ -953,7 +953,7 @@ class BestResponseLearner:
         self.val_embeddings = self.embeddings[self.val_indices]
         print(f"BestResponseLearner split: {len(self.train_policies)} train, {len(self.val_policies)} val")
 
-    def train_best_responder(self, optimizer_type="adam", epochs=1, max_batch_size=20, num_trajectories_per_policy_per_epoch=2, experiment_info: ExperimentInfo = None):
+    def train_best_responder(self, optimizer_type="adam", epochs=1, max_batch_size=20, num_trajectories_per_policy_per_epoch=2, experiment_info: ExperimentInfo = None, is_control: bool = False, plot_dir: str = None):
         NUM_ENVS = 1
         # num_steps_per_batch = 20 # self.config.num_steps # IS THIS USED?
         info_state_shape = self.game.information_state_tensor_shape()
@@ -1015,8 +1015,17 @@ class BestResponseLearner:
         trajectory_payoffs = []
         ppo_metrics_list = []
 
+        initial_lr = self.config.learning_rate
+        final_lr = getattr(self.config, 'final_learning_rate', initial_lr)
+
         for epoch in range(epochs):
+            epoch_start = time.time()
             print(f"Epoch {epoch} of {epochs}")
+            if epochs > 1:
+                lr = initial_lr + (final_lr - initial_lr) * epoch / (epochs - 1)
+            else:
+                lr = initial_lr
+            self.agent.optimizer.param_groups[0]["lr"] = lr
             # Add a tqdm progress bar to show progress through policies in the current epoch
             pbar = tqdm(
                 zip(self.train_policies, self.train_embeddings),
@@ -1087,6 +1096,8 @@ class BestResponseLearner:
                 if metrics is not None:
                     ppo_metrics_list.append(metrics)
 
+            print(f"Epoch {epoch} took {time.time() - epoch_start:.2f}s")
+
         # Store metrics for later access
         self.training_metrics = {
             'trajectory_payoffs': trajectory_payoffs,
@@ -1094,7 +1105,7 @@ class BestResponseLearner:
         }
 
         # Plot training metrics
-        self._plot_training_metrics(trajectory_payoffs, ppo_metrics_list, window_size=200, experiment_info=experiment_info)
+        self._plot_training_metrics(trajectory_payoffs, ppo_metrics_list, window_size=450, experiment_info=experiment_info, is_control=is_control, plot_dir=plot_dir)
                 # self.agent.learn([time_step])
                 # return cumulative_rewards
                 # update = -1
@@ -1138,7 +1149,7 @@ class BestResponseLearner:
                 #         # pbar.set_postfix(elapsed=f"{time_elapsed/60:.1f}min", remaining=f"{time_remaining_est/60:.1f}min")
                 #         pbar.set_description(f"step {self.agent.total_steps_done}/{num_steps_per_policy_per_epoch} ; elapsed: {time_elapsed/60:.1f}min ; remaining: {time_remaining_est/60:.1f}min")
 
-    def _plot_training_metrics(self, trajectory_payoffs: list, ppo_metrics: list, window_size: int = 100, experiment_info: ExperimentInfo = None):
+    def _plot_training_metrics(self, trajectory_payoffs: list, ppo_metrics: list, window_size: int = 100, experiment_info: ExperimentInfo = None, is_control: bool = False, plot_dir: str = None):
         """
         Plot training metrics with moving average.
 
@@ -1252,18 +1263,22 @@ class BestResponseLearner:
 
         # Add experiment label as title at top of figure
         if experiment_info:
-            fig.suptitle(experiment_info.label_string, fontsize=14, fontweight='bold')
+            run_type = "Control" if is_control else "Experiment"
+            fig.suptitle(f"[{run_type}] {experiment_info.label_string}", fontsize=14, fontweight='bold')
 
         plt.tight_layout()
 
-        # Save plot to results/training_metrics with unique filename
+        # Save plot to the provided plot_dir, or fall back to a timestamped directory
         from datetime import datetime
-        metrics_dir = os.path.join('results', 'training_metrics')
-        os.makedirs(metrics_dir, exist_ok=True)
-        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-        random_suffix = random.randint(10, 99)
-        filename = f'tm_{timestamp}_{random_suffix}.png'
-        plot_path = os.path.join(metrics_dir, filename)
+        if plot_dir is not None:
+            run_dir = plot_dir
+        else:
+            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            random_suffix = random.randint(10, 99)
+            run_dir = os.path.join('results', 'training_metrics', f'{timestamp}_{random_suffix}')
+        os.makedirs(run_dir, exist_ok=True)
+        filename = 'control.png' if is_control else 'experiment.png'
+        plot_path = os.path.join(run_dir, filename)
         plt.savefig(plot_path, dpi=150, bbox_inches='tight')
         print(f"Training plot saved to {plot_path}")
         plt.close(fig)

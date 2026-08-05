@@ -1,1 +1,41 @@
-Submitting 12 jobs with max_workers=3
+Running 6 jobs sequentially (no multiprocessing)
+Running Task B: kuhn_poker neupl(True)(g) p0vp1 randloss=True N=1000 Task B
+Model type: random_forest
+Number of P1 policies: 1000
+Number of P2 policies: Evaluating on validation set...
+Running control comparison with shuffled embeddings...
+Evaluating control (shuffled embeddings) on validation set...
+Control comparison results:
+  Original avg empirical payoff: 2.1242
+  Control avg empirical payoff:  2.2920
+  Original avg exact exploitability: 3.1720
+  Control avg exact exploitability:  3.1720
+Completed: leduc_poker ppo random 0 reconstruction-autoencoder Task E
+Running Task E: leduc_poker ppo random 0 reconstruction-autoencoder Task E
+Model type: None
+Number of policies: 500
+Player ID: 0
+Embedding dimension: 64
+Evaluating on validation set...
+Running control comparison with shuffled embeddings...
+Evaluating control (shuffled embeddings) on validation set...
+Control comparison results:
+  Original avg empirical payoff: 2.0899
+  Control avg empirical payoff:  1.9921
+  Original avg exact exploitability: 3.0880
+  Control avg exact exploitability:  3.0880
+Completed: leduc_poker ppo random 0 reconstruction-autoencoder Task E
+Running Task E: leduc_poker ppo random 0 reconstruction-autoencoder Task E
+Model type: None
+Number of policies: 500
+Player ID: 0
+Embedding dimension: 64
+Evaluating on validation set...
+Running control comparison with shuffled embeddings...
+Evaluating control (shuffled embeddings) on validation set...
+Control comparison results:
+  Original avg empirical payoff: 2.2590
+  Control avg empirical payoff:  1.8028
+  Original avg exact exploitability: 3.0245
+  Control avg exact exploitability:  3.0245
+Completed: leduc_poker ppo random 0 reconstruction-autoencoder Task E

@@ -8,6 +8,9 @@ wheels/
 data/
 checkpoints/
 
+# macOS
+.DS_Store
+
 
 # Virtual environments
 .venv
@@ -23,12 +26,13 @@ results/**/old/
 outputs/
 
 # Generated logs
-logs/all_downstream_tasks.log
+logs/*.log
 
 # Generated images and metrics
 training_metrics.png
 training_payoffs.png
 results/training_metrics/
+results/visualizations/*.npz
 
 # Auto-generated result backups
 results/archive/

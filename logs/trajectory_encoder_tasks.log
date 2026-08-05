@@ -1,3 +1,0 @@
-Loaded checkpoint from /Users/kevinyang/Desktop/SSL Workshop/ssl-project/checkpoints/trajectory_encoder_leduc_random_improved_500.pt
-Training history: Best epoch 163, Best val loss: 0.39944342204502653
-No policies provided - will use uniform random opponent (may cause distribution shift!)

@@ -1,3 +1,199 @@
 {
-  "run": []
+  "run": [
+    {
+      "experiment_label": "leduc_poker ppo random 0 reconstruction-autoencoder Task E",
+      "results": [
+        {
+          "val_metrics": {
+            "avg_empirical_payoff": 2.1241750717163086,
+            "avg_exact_exploitability": 3.1719980239868164,
+            "num_policies": 100
+          },
+          "config": {
+            "model_config": {
+              "model_type": null,
+              "hidden_dims": null,
+              "dropout": 0.0,
+              "learning_rate": 0.0001,
+              "num_epochs": 5000,
+              "batch_size": 16,
+              "early_stopping_patience": 50,
+              "optimizer_type": "adamw"
+            },
+            "player_id": 0,
+            "validation_split": 0.2,
+            "max_batch_size": 30,
+            "num_trajectories_per_policy_per_epoch": 13,
+            "epochs": 32,
+            "compare_to_control": true
+          },
+          "omega_conf": {
+            "seed": 0,
+            "max_steps": 10000000,
+            "game": "classical_phantom_ttt",
+            "save_dir": "results",
+            "group_name": "test",
+            "experiment_dir": "",
+            "compute_exploitability": false,
+            "compute_exploitability_every": 500000,
+            "run_in_safe_mode": true,
+            "job_id": -1,
+            "algorithm": {
+              "algorithm_name": "ppo",
+              "anneal_lr": true,
+              "clip_coef": 0.035,
+              "clip_vloss": true,
+              "ent_coef": 0.012,
+              "gae": true,
+              "gae_lambda": 0.95,
+              "gamma": 0.99,
+              "max_grad_norm": 6,
+              "norm_adv": true,
+              "learning_rate": 5.5e-05,
+              "final_learning_rate": 5.5e-05,
+              "num_envs": 1,
+              "num_minibatches": 1,
+              "num_steps": 256,
+              "target_kl": null,
+              "update_epochs": 8,
+              "vf_coef": 0.0625,
+              "eval_every": 3
+            }
+          },
+          "control_metrics": {
+            "avg_empirical_payoff": 2.2920002937316895,
+            "avg_exact_exploitability": 3.1719980239868164,
+            "num_policies": 100
+          }
+        },
+        {
+          "val_metrics": {
+            "avg_empirical_payoff": 2.0899250507354736,
+            "avg_exact_exploitability": 3.088027238845825,
+            "num_policies": 100
+          },
+          "config": {
+            "model_config": {
+              "model_type": null,
+              "hidden_dims": null,
+              "dropout": 0.0,
+              "learning_rate": 0.0001,
+              "num_epochs": 5000,
+              "batch_size": 16,
+              "early_stopping_patience": 50,
+              "optimizer_type": "adamw"
+            },
+            "player_id": 0,
+            "validation_split": 0.2,
+            "max_batch_size": 30,
+            "num_trajectories_per_policy_per_epoch": 13,
+            "epochs": 32,
+            "compare_to_control": true
+          },
+          "omega_conf": {
+            "seed": 0,
+            "max_steps": 10000000,
+            "game": "classical_phantom_ttt",
+            "save_dir": "results",
+            "group_name": "test",
+            "experiment_dir": "",
+            "compute_exploitability": false,
+            "compute_exploitability_every": 500000,
+            "run_in_safe_mode": true,
+            "job_id": -1,
+            "algorithm": {
+              "algorithm_name": "ppo",
+              "anneal_lr": true,
+              "clip_coef": 0.035,
+              "clip_vloss": true,
+              "ent_coef": 0.012,
+              "gae": true,
+              "gae_lambda": 0.95,
+              "gamma": 0.99,
+              "max_grad_norm": 6,
+              "norm_adv": true,
+              "learning_rate": 5.5e-05,
+              "final_learning_rate": 5.5e-05,
+              "num_envs": 1,
+              "num_minibatches": 1,
+              "num_steps": 256,
+              "target_kl": null,
+              "update_epochs": 8,
+              "vf_coef": 0.0625,
+              "eval_every": 3
+            }
+          },
+          "control_metrics": {
+            "avg_empirical_payoff": 1.9920802116394043,
+            "avg_exact_exploitability": 3.088027238845825,
+            "num_policies": 100
+          }
+        },
+        {
+          "val_metrics": {
+            "avg_empirical_payoff": 2.258975028991699,
+            "avg_exact_exploitability": 3.0244905948638916,
+            "num_policies": 100
+          },
+          "config": {
+            "model_config": {
+              "model_type": null,
+              "hidden_dims": null,
+              "dropout": 0.0,
+              "learning_rate": 0.0001,
+              "num_epochs": 5000,
+              "batch_size": 16,
+              "early_stopping_patience": 50,
+              "optimizer_type": "adamw"
+            },
+            "player_id": 0,
+            "validation_split": 0.2,
+            "max_batch_size": 30,
+            "num_trajectories_per_policy_per_epoch": 13,
+            "epochs": 32,
+            "compare_to_control": true
+          },
+          "omega_conf": {
+            "seed": 0,
+            "max_steps": 10000000,
+            "game": "classical_phantom_ttt",
+            "save_dir": "results",
+            "group_name": "test",
+            "experiment_dir": "",
+            "compute_exploitability": false,
+            "compute_exploitability_every": 500000,
+            "run_in_safe_mode": true,
+            "job_id": -1,
+            "algorithm": {
+              "algorithm_name": "ppo",
+              "anneal_lr": true,
+              "clip_coef": 0.035,
+              "clip_vloss": true,
+              "ent_coef": 0.012,
+              "gae": true,
+              "gae_lambda": 0.95,
+              "gamma": 0.99,
+              "max_grad_norm": 6,
+              "norm_adv": true,
+              "learning_rate": 5.5e-05,
+              "final_learning_rate": 5.5e-05,
+              "num_envs": 1,
+              "num_minibatches": 1,
+              "num_steps": 256,
+              "target_kl": null,
+              "update_epochs": 8,
+              "vf_coef": 0.0625,
+              "eval_every": 3
+            }
+          },
+          "control_metrics": {
+            "avg_empirical_payoff": 1.8027600049972534,
+            "avg_exact_exploitability": 3.0244905948638916,
+            "num_policies": 100
+          }
+        }
+      ],
+      "task_id": "E"
+    }
+  ]
 }

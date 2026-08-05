@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a research project for self-supervised learning on multi-agent RL policies. The project trains policy encoders using different approaches (weight autoencoders, functional autoencoders, trajectory transformers) and evaluates them on downstream prediction tasks in imperfect-information games (Kuhn Poker, Leduc Poker).
 
+## Environment
+
+Use `uv run python3` to run any Python command in this project. Do not activate the venv manually.
+
 ## Common Commands
 
 ### Running Experiments
@@ -67,7 +71,8 @@ python analyze_downstream_results.py   # Analyze results from all_downstream_tas
 1. **Weight Autoencoder** ([weight_autoencoder.py](weight_autoencoder.py)): Compresses PPO agent weights into fixed-size embeddings
 2. **Functional Autoencoder** ([functional_autoencoder.py](functional_autoencoder.py)): Encodes policies based on their action probability distributions across game states
 3. **Trajectory Transformer** ([trajectory_encoder.py](trajectory_encoder.py)): Uses transformer to encode behavioral trajectories from policy rollouts
-4. **Identity**: Baseline that uses raw flattened policy weights
+4. **NEUPL Embedding** ([psro.py](psro.py)): Uses the conditioning embedding a policy is natively indexed by during NEUPL training as its representation, rather than a separately-trained encoder network (`embedding_type='neupl'` in [config.py](config.py))
+5. **Identity**: Baseline that uses raw flattened policy weights
 
 **Downstream Tasks** ([tasks.py](tasks.py)):
 - **Task A**: Predict policy payoff vs uniform random opponent

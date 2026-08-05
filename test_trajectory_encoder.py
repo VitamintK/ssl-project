@@ -52,7 +52,7 @@ def load_trajectory_encoder_from_checkpoint(checkpoint_path: str, game: pyspiel.
     Returns:
         Tuple of (model, adapter, config)
     """
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False) # probably shouldn't do weights_only=False because it's a security issue or something
 
     if 'config' in checkpoint:
         config = checkpoint['config']

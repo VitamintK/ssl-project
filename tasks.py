@@ -392,6 +392,13 @@ def run_task_e(
     experiment_info: ExperimentInfo,
     device: str = "cpu"
 ) -> dict:
+    import os
+    from datetime import datetime
+    import random as _random
+    _ts = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    _suffix = _random.randint(10, 99)
+    plot_dir = os.path.join('results', 'training_metrics', f'{_ts}_{_suffix}')
+
     logger.info(f"Running Task E: {experiment_info.label_string}")
     logger.info(f"Model type: {config.model_config.model_type}")
     logger.info(f"Number of policies: {len(policies)}")
@@ -417,6 +424,7 @@ def run_task_e(
         embeddings=embeddings,
         policy_player_id=config.player_id,
         config=args,
+        device=device,
     )
 
     predictor.train_best_responder(
@@ -425,6 +433,8 @@ def run_task_e(
         max_batch_size=config.max_batch_size,
         num_trajectories_per_policy_per_epoch=config.num_trajectories_per_policy_per_epoch,
         experiment_info=experiment_info,
+        is_control=False,
+        plot_dir=plot_dir,
     )
 
     # Evaluate
@@ -461,6 +471,8 @@ def run_task_e(
             max_batch_size=config.max_batch_size,
             num_trajectories_per_policy_per_epoch=config.num_trajectories_per_policy_per_epoch,
             experiment_info=experiment_info,
+            is_control=True,
+            plot_dir=plot_dir,
         )
 
         logger.info("Evaluating control (shuffled embeddings) on validation set...")

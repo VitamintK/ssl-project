@@ -1,0 +1,4 @@
+open_spiel
+tqdm
+cvxpy # not sure if we need this but it seems like open_spiel needs it
+dm-tree # I guess open_spiel needs this too

@@ -599,11 +599,18 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
     lr_anneal_iters = alg.lr_anneal_iters
 
     def _set_lr(lr):
-        """Update optimizer LR for both players (shared network per player)."""
+        """Update optimizer LR for both players.
+
+        Each policy index 1..N-1 has its own PPO instance with its own optimizer
+        (they only share the underlying network), so the LR must be set on every
+        one of them individually -- setting it on just one index leaves the rest
+        training at their original constant LR forever.
+        """
         for player in range(2):
-            opt = agents[player][1]._policy.agent.optimizer
-            for pg in opt.param_groups:
-                pg['lr'] = lr
+            for pi in range(1, N):
+                opt = agents[player][pi]._policy.agent.optimizer
+                for pg in opt.param_groups:
+                    pg['lr'] = lr
 
     def _set_payoff_matrix_update_rate(update_rate):
         state.payoff_matrix_update_rate = update_rate
@@ -726,6 +733,7 @@ def load_ppo_agents_from_psro(
         player_id: Union[int, None] = None,
         hidden_size: int = 512,
         shuffle: bool = True,
+        device: str = 'cpu',
 ):
     PATH = f"results/test/psro/ppo/hs{hidden_size}/{game_short_name}"
     base_dir = Path(PATH)
@@ -739,7 +747,7 @@ def load_ppo_agents_from_psro(
             files = list(subdir.glob(glob))
             for file in files:
                 policy = torch.load(file)
-                agent = PPOAgent(num_actions, info_state_size, 'cpu', hidden_size=hidden_size)
+                agent = PPOAgent(num_actions, info_state_size, device, hidden_size=hidden_size)
                 agent.actor.load_state_dict(policy)
                 ppo_agents.append(agent)
     if shuffle:
@@ -896,6 +904,7 @@ def load_ppo_agents_from_neupl(
         policy_embedding_size: int = 64,
         # shuffle: bool = True,
         dir_name: Optional[str] = None,
+        device: str = 'cpu',
 ):
     """loads a single neupl checkpoint."""
     PATH = f"results/test/neupl/ppo/hs{hidden_size}/{game_short_name}"
@@ -928,11 +937,11 @@ def load_ppo_agents_from_neupl(
     # pt0 = max(chosen_subdir.glob("policy0_ckpt24.pt"))
     # pt1 = max(chosen_subdir.glob("policy1_ckpt24.pt"))
     agent0 = PPOConditionedOnPolicyRepresentationAgent(
-        num_actions, info_state_size, 'cpu',
+        num_actions, info_state_size, device,
         num_policies=num_policies, policy_embedding_size=policy_embedding_size, hidden_size=hidden_size
     )
     agent1 = PPOConditionedOnPolicyRepresentationAgent(
-        num_actions, info_state_size, 'cpu',
+        num_actions, info_state_size, device,
         num_policies=num_policies, policy_embedding_size=policy_embedding_size, hidden_size=hidden_size
     )
     agent0.load(pt0)
@@ -967,6 +976,7 @@ def make_ppo_policies_from_neupl_agents(
     """
     game = pyspiel.load_game(game_name)
     policies = []
+    agent_device = next(agents[0].parameters()).device
 
     for player_id in range(2):
         player_policies = []
@@ -975,7 +985,7 @@ def make_ppo_policies_from_neupl_agents(
             # Collect all existing embeddings
             existing_embeddings = []
             for policy_idx in range(1, original_num_policies):  # Skip 0 (uniform random)
-                policy_index_tensor = torch.tensor(policy_idx)
+                policy_index_tensor = torch.tensor(policy_idx, device=agent_device)
                 if interpolate_prenorm:
                     # Get pre-norm embeddings for Gaussian fitting
                     embedding = agents[player_id].embedding_prenorm(policy_index_tensor)
@@ -996,7 +1006,7 @@ def make_ppo_policies_from_neupl_agents(
 
             # Convert to policies
             for sampled_embedding in sampled_embeddings:
-                embedding_tensor = torch.tensor(sampled_embedding, dtype=torch.float32)
+                embedding_tensor = torch.tensor(sampled_embedding, dtype=torch.float32, device=agent_device)
 
                 if interpolate_prenorm:
                     # Apply normalization to the sampled pre-norm embedding
@@ -1013,8 +1023,8 @@ def make_ppo_policies_from_neupl_agents(
         elif sampling_mode == "interpolate":
             # Original interpolation method
             for i in range(num_policies_to_make):
-                policy_index_1 = torch.tensor(random.randint(1, original_num_policies - 1))
-                policy_index_2 = torch.tensor(random.randint(1, original_num_policies - 1))
+                policy_index_1 = torch.tensor(random.randint(1, original_num_policies - 1), device=agent_device)
+                policy_index_2 = torch.tensor(random.randint(1, original_num_policies - 1), device=agent_device)
                 mixture = random.random()
 
                 if interpolate_prenorm:
@@ -1045,8 +1055,9 @@ def make_neupl_policies(
     directory: Optional[str] = None,
     interpolate_prenorm: bool = True,
     sampling_mode: Literal["interpolate", "gaussian"] = "interpolate",
+    device: str = 'cpu',
 ):
-    agents = load_ppo_agents_from_neupl(game_short_name=game_short_name, **neupl_config, dir_name=directory)
+    agents = load_ppo_agents_from_neupl(game_short_name=game_short_name, **neupl_config, dir_name=directory, device=device)
     # Read the embedding table size directly from the loaded agents so it always matches.
     original_num_policies = agents[0].num_policies
     return make_ppo_policies_from_neupl_agents(

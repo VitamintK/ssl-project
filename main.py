@@ -29,8 +29,8 @@ from weight_autoencoder import (
     save_autoencoder,
     load_autoencoder,
 )
-from tasks import run_task_a, run_task_d, run_task_e
-from config import TaskAConfig, TaskDConfig, ModelConfig, TaskEConfig, ExperimentInfo
+from tasks import run_task_a, run_task_b, run_task_d, run_task_e
+from config import TaskAConfig, TaskBConfig, TaskDConfig, ModelConfig, TaskEConfig, ExperimentInfo
 from tqdm import tqdm
 
 results = {'run': []}
@@ -966,13 +966,18 @@ device=device)
 
 
 def _worker_init():
-    """Disable tqdm in worker processes.
+    """One-time setup for each worker process.
 
-    os.environ["TQDM_DISABLE"] doesn't work here because unpickling this
-    function triggers the import of this module (and tqdm) before the
-    initializer body runs. Patching the class works because it fires at
-    instance-creation time, after all imports are done.
+    Runs before any task is unpickled, so before downstream.py (and
+    matplotlib.pyplot) is imported in the worker.  Setting MPLBACKEND=Agg
+    here ensures that when matplotlib.pyplot is later imported it uses the
+    off-screen Agg backend instead of the macOS Cocoa backend, which would
+    create a Dock icon and keep the process alive after the task finishes.
+
+    tqdm is patched at class level rather than via TQDM_DISABLE because the
+    env-var approach is checked at import time, which has already passed.
     """
+    os.environ['MPLBACKEND'] = 'Agg'
     from functools import partialmethod
     tqdm.__init__ = partialmethod(tqdm.__init__, disable=True)
 
@@ -988,7 +993,8 @@ def _run_experiment(spec: dict) -> tuple:
 
     game = pyspiel.load_game(game_name)
     game_short_name = game.get_type().short_name
-    device = get_device_string()
+    device = spec.get('device', get_device_string())
+    policy_device = spec.get('policy_device', 'cpu')
 
     # --- load policies and embeddings ---
     model_dir = None
@@ -1001,13 +1007,15 @@ def _run_experiment(spec: dict) -> tuple:
             directory=model_dir,
             interpolate_prenorm=spec['INTERPOLATE_PRENORM'],
             sampling_mode=spec['NEUPL_SAMPLING_MODE'],
+            device=policy_device,
         )
         policies = [p_e[1] for p_e in policies_and_embeddings[player_id]]
         embeddings = [p_e[0].detach().cpu().numpy() for p_e in policies_and_embeddings[player_id]]
     elif source == 'psro':
         model_dir = f"results/test/psro/ppo/hs256/{game_short_name}"
         ppo_agents = load_ppo_agents_from_psro(
-            game_short_name=game_short_name, hidden_size=256, player_id=player_id, shuffle=True)
+            game_short_name=game_short_name, hidden_size=256, player_id=player_id, shuffle=True,
+            device=policy_device)
         if embedding_type == 'identity':
             policies, embeddings = get_policies_and_embeddings2(
                 game, player_id, ppo_agents, "psro_" + game_short_name, game_short_name, device)
@@ -1018,7 +1026,7 @@ def _run_experiment(spec: dict) -> tuple:
         info_state_size = game.information_state_tensor_shape()
         num_actions = game.num_distinct_actions()
         layer_init = make_diverse_random_kuhn_poker_layer_init(game)
-        ppo_agents = [PPOAgent(num_actions, info_state_size, 'cpu', layer_init, 256)
+        ppo_agents = [PPOAgent(num_actions, info_state_size, policy_device, layer_init, 256)
                       for _ in range(spec['N_random'])]
         if embedding_type == 'identity':
             policies, embeddings = get_policies_and_embeddings2(
@@ -1028,6 +1036,32 @@ def _run_experiment(spec: dict) -> tuple:
                 game, player_id, ppo_agents, "ppo random " + game_short_name, game_short_name, device)
     else:
         raise ValueError(f"Unknown source: {source}")
+
+    # For Task B, also need the opposing player's policies and embeddings
+    p2_policies = p2_embeddings = None
+    if task == 'b':
+        if source == 'neupl':
+            p2_policies = [p_e[1] for p_e in policies_and_embeddings[1]]
+            p2_embeddings = [p_e[0].detach().cpu().numpy() for p_e in policies_and_embeddings[1]]
+        elif source == 'psro':
+            ppo_agents_p2 = load_ppo_agents_from_psro(
+                game_short_name=game_short_name, hidden_size=256, player_id=1, shuffle=True,
+                device=policy_device)
+            if embedding_type == 'identity':
+                p2_policies, p2_embeddings = get_policies_and_embeddings2(
+                    game, 1, ppo_agents_p2, "psro_" + game_short_name, game_short_name, device)
+            else:
+                p2_policies, p2_embeddings = get_policies_and_embeddings(
+                    game, 1, ppo_agents_p2, "psro_" + game_short_name, game_short_name, device)
+        elif source == 'random':
+            ppo_agents_p2 = [PPOAgent(num_actions, info_state_size, policy_device, layer_init, 256)
+                              for _ in range(spec['N_random'])]
+            if embedding_type == 'identity':
+                p2_policies, p2_embeddings = get_policies_and_embeddings2(
+                    game, 1, ppo_agents_p2, "ppo random " + game_short_name, game_short_name, device)
+            else:
+                p2_policies, p2_embeddings = get_policies_and_embeddings(
+                    game, 1, ppo_agents_p2, "ppo random " + game_short_name, game_short_name, device)
 
     # --- run task ---
     if task == 'a':
@@ -1047,11 +1081,11 @@ def _run_experiment(spec: dict) -> tuple:
                             config=config, experiment_info=experiment_info, device=device)
     elif task == 'e':
         if spec['game_name'] == 'kuhn_poker':
-            epochs = 10
-            num_trajectories_per_policy_per_epoch = 7
+            epochs = 18
+            num_trajectories_per_policy_per_epoch = 4
             max_batch_size = 20
         elif spec['game_name'] == 'leduc_poker':
-            epochs = 15
+            epochs = 32
             num_trajectories_per_policy_per_epoch = 13
             max_batch_size = 30
         else:
@@ -1067,6 +1101,14 @@ def _run_experiment(spec: dict) -> tuple:
         )
         result = run_task_e(game=game, policies=policies, embeddings=embeddings,
                             config=config, experiment_info=experiment_info, device=device)
+    elif task == 'b':
+        config = TaskBConfig(
+            model_config=ModelConfig(model_type=spec['predictor_type']),
+            validation_split=0.2,
+        )
+        result = run_task_b(game=game, p1_policies=policies, p1_embeddings=embeddings,
+                            p2_policies=p2_policies, p2_embeddings=p2_embeddings,
+                            config=config, experiment_info=experiment_info, device=device)
     else:
         raise ValueError(f"Unknown task: {task}")
 
@@ -1077,14 +1119,20 @@ def _run_experiment(spec: dict) -> tuple:
 
 LEDUC_RUNS_TO_LOAD = {
     True: [
-        '2025-12-12_11-19-54-744419_40b',
-        '2025-12-11_23-59-52-950280_b14',
-        '2025-12-11_18-00-46-759499_234',
+        '2026-04-23_17-41-50-534943_5f4',
+        '2026-04-23_17-41-50-534943_5f4',
+        '2026-04-23_17-41-50-534943_5f4'
+        # '2025-12-12_11-19-54-744419_40b',
+        # '2025-12-11_23-59-52-950280_b14',
+        # '2025-12-11_18-00-46-759499_234',
     ],
     False: [
-        '2025-12-12_11-19-52-549639_bb8',
-        '2025-12-11_23-59-48-262932_dfa',
-        '2025-12-11_18-00-37-642050_b0d',
+        '2026-04-22_18-16-33-095735_e80',
+        '2026-04-22_18-16-33-095735_e80',
+        '2026-04-22_18-16-33-095735_e80',
+        # '2025-12-12_11-19-52-549639_bb8',
+        # '2025-12-11_23-59-48-262932_dfa',
+        # '2025-12-11_18-00-37-642050_b0d',
     ],
 }
 if __name__ == "__main__":
@@ -1092,20 +1140,32 @@ if __name__ == "__main__":
     _parser = _argparse.ArgumentParser()
     _parser.add_argument("--no-multiprocessing", action="store_true",
                          help="Run jobs sequentially instead of in a process pool")
+    _parser.add_argument("--game-name", type=str, default="kuhn_poker", help="Game to run", choices=["kuhn_poker", "leduc_poker"])
+    _parser.add_argument("--device", type=str, default=None, help="Device to use (e.g. cpu, cuda, mps); defaults to auto-detect")
+    _parser.add_argument("--policy-device", type=str, default="cpu", help="Device to load opponent policies onto (default: cpu)")
     _args = _parser.parse_args()
 
     # run_all()
     # exit()
 
     RUN_TASK_A = False
-    RUN_TASK_B = False
+    RUN_TASK_B = True
     RUN_TASK_C = False
     RUN_TASK_D = False
-    RUN_TASK_E = True
+    RUN_TASK_E = False
 
     RUN_NEUPL = True
     RUN_PSRO = False
     RUN_RANDOM = False
+
+    RUN_IDENTITY = False
+    RUN_RECONSTRUCTION_AUTOENCODER = True
+
+    encoder_types = []
+    if RUN_IDENTITY:
+        encoder_types.append('identity')
+    if RUN_RECONSTRUCTION_AUTOENCODER:
+        encoder_types.append('reconstruction-autoencoder')
 
     NUM_SEEDS = 3
 
@@ -1122,8 +1182,8 @@ if __name__ == "__main__":
     logger.addHandler(_sh)
 
     # game_name = "kuhn_poker"
-    game_name = "leduc_poker"
-    device = get_device_string()
+    game_name = _args.game_name
+    device = _args.device if _args.device is not None else get_device_string()
     print("Using device:", device)
 
     N = 1000
@@ -1138,10 +1198,10 @@ if __name__ == "__main__":
     if RUN_NEUPL:
         if game_name == "leduc_poker":
             for use_randall_loss in [True, False]:
-                chosen = select_neupl_directory(game_name, use_randall_loss, hidden_size=256)
+                # chosen = select_neupl_directory(game_name, use_randall_loss, hidden_size=256)
                 for s in range(3):
-                    # neupl_run_dirs[(use_randall_loss, s)] = LEDUC_RUNS_TO_LOAD[use_randall_loss][s]
-                    neupl_run_dirs[(use_randall_loss, s)] = chosen
+                    neupl_run_dirs[(use_randall_loss, s)] = LEDUC_RUNS_TO_LOAD[use_randall_loss][s]
+                    # neupl_run_dirs[(use_randall_loss, s)] = chosen
         else:
             for use_randall_loss in [True, False]:
                 chosen = select_neupl_directory(game_name, use_randall_loss, hidden_size=256)
@@ -1177,6 +1237,16 @@ if __name__ == "__main__":
                                       'experiment_info': ExperimentInfo(
                                           f'{game_short_name} neupl p{player_id} randloss={use_randall_loss} N={N} Task E',
                                           embedding_type='neupl', task_id='E')})
+                if RUN_TASK_B:
+                    specs.append({'source': 'neupl', 'game_name': game_name, 'player_id': 0,
+                                  'embedding_type': 'neupl', 'run_dir': run_dir,
+                                  'neupl_config': neupl_config, 'N': N,
+                                  'NEUPL_SAMPLING_MODE': NEUPL_SAMPLING_MODE,
+                                  'INTERPOLATE_PRENORM': INTERPOLATE_PRENORM,
+                                  'task': 'b', 'predictor_type': PREDICTOR_TYPE,
+                                  'experiment_info': ExperimentInfo(
+                                      f'{game_short_name} neupl({INTERPOLATE_PRENORM})({NEUPL_SAMPLING_MODE[:1]}) p0vp1 randloss={use_randall_loss} N={N} Task B',
+                                      embedding_type='neupl', task_id='B')})
         if RUN_PSRO:
             for player_id in range(2):
                 for emb_type in ['reconstruction-autoencoder', 'identity']:
@@ -1197,8 +1267,15 @@ if __name__ == "__main__":
                                       'experiment_info': ExperimentInfo(
                                           f'{game_short_name} psro {player_id} {emb_type} Task E',
                                           embedding_type=emb_type, task_id='E')})
+            if RUN_TASK_B:
+                for emb_type in ['reconstruction-autoencoder', 'identity']:
+                    specs.append({'source': 'psro', 'game_name': game_name, 'player_id': 0,
+                                  'embedding_type': emb_type, 'task': 'b', 'predictor_type': 'linear',
+                                  'experiment_info': ExperimentInfo(
+                                      f'{game_short_name} psro {emb_type} Task B',
+                                      embedding_type=emb_type, task_id='B')})
         if RUN_RANDOM:
-            for emb_type in ['reconstruction-autoencoder', 'identity']:
+            for emb_type in encoder_types:
                 base = dict(source='random', game_name=game_name, player_id=0,
                             embedding_type=emb_type, N_random=1000)
                 if RUN_TASK_A:
@@ -1216,6 +1293,16 @@ if __name__ == "__main__":
                                   'experiment_info': ExperimentInfo(
                                       f'{game_short_name} ppo random 0 {emb_type} Task E',
                                       embedding_type=emb_type, task_id='E')})
+                if RUN_TASK_B:
+                    specs.append({**base, 'task': 'b', 'predictor_type': 'linear',
+                                  'experiment_info': ExperimentInfo(
+                                      f'{game_short_name} ppo random 0 {emb_type} Task B',
+                                      embedding_type=emb_type, task_id='B')})
+
+    policy_device = _args.policy_device
+    for spec in specs:
+        spec['device'] = device
+        spec['policy_device'] = policy_device
 
     if _args.no_multiprocessing:
         logger.info(f"Running {len(specs)} jobs sequentially (no multiprocessing)")

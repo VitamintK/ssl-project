@@ -1,14 +1,23 @@
+import argparse
 import json
 import math
 from collections import defaultdict
 from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    '--aggregate-randall', action='store_true',
+    help='Aggregate NeuPL randall_loss=True/False variants into one row (default: keep separate)',
+)
+args = parser.parse_args()
+aggregate_randall = args.aggregate_randall
 
 # ── File picker ───────────────────────────────────────────────────────────────
 _default = Path('results/all_downstream_tasks.json')
 _archive = sorted(Path('results/archive').glob('downstream_results_*.json'), reverse=True)
 
 _choices = [(_default, 'results/all_downstream_tasks.json (default)')]
-_choices += [(_p, f'archive/{_p.name}') for _p in _archive[:10]]
+_choices += [(_p, f'archive/{_p.name}') for _p in _archive[:40]]
 
 print("Select results file:")
 for _i, (_, _name) in enumerate(_choices):
@@ -140,10 +149,45 @@ def _imp_cell(mse_vals, base_vals):
     if b == 0:
         return "--"
     pct = (b - m) / b * 100
-    return f"{pct:+.1f}\\%"
+    sign = '-' if pct < 0 else ''
+    return f"{sign}{abs(pct):.1f}\\%"
 
 
-# Group: (encoder_key, task_display, player) -> game -> [(mse, baseline), ...]
+def _get_randall_loss(run):
+    """Return the randall_loss bool from a run's config or label, or None if absent."""
+    cfg = run.get('config', {})
+    for key in ('use_randall_loss', 'randall_loss'):
+        if key in cfg:
+            return cfg[key]
+    label = run.get('experiment_label', '')
+    if 'randloss=True' in label:
+        return True
+    if 'randloss=False' in label:
+        return False
+    return None
+
+
+def _encoder_display_name(encoder_key, base_display, randall_loss):
+    """Return display name, appending +RL/-RL suffix for NeuPL variants when split."""
+    if encoder_key == 'neupl' and randall_loss is not None:
+        return base_display + ('+RL' if randall_loss else '-RL')
+    return base_display
+
+
+def _get_exploit(result, task_id):
+    if task_id == 'E':
+        return result.get('val_metrics', {}).get('avg_exact_exploitability')
+    return None
+
+
+def _abs_imp_cell(mse_vals, base_vals, n_decimals=3):
+    """Absolute improvement (model payoff − control payoff); positive = model wins."""
+    diff = _mean(mse_vals) - _mean(base_vals)
+    return f"{diff:+.{n_decimals}f}"
+
+
+# Group: (encoder_key, task_id, task_display, player, randall_loss) -> game -> [(mse, base, exploit), ...]
+# task_id kept separately so Task E rows can be split into their own table.
 grouped = defaultdict(lambda: defaultdict(list))
 
 for run in data['run']:
@@ -152,42 +196,67 @@ for run in data['run']:
     game, encoder_key, player, task_display = _parse_label(label)
     if encoder_key is None:
         continue
+    randall = None if aggregate_randall else _get_randall_loss(run)
     for result in run['results']:
         mse, base = _get_metrics(result, task_id)
         if mse is None or base is None:
             continue
-        grouped[(encoder_key, task_display, player)][game].append((mse, base))
+        exploit = _get_exploit(result, task_id)
+        grouped[(encoder_key, task_id, task_display, player, randall)][game].append((mse, base, exploit))
 
 
-# Emit rows (no header — caller pastes these inside their tabular environment)
-current_encoder = None
-for encoder_key, encoder_display in ENCODER_ORDER:
-    row_keys = sorted({(task, player)
-                       for (enc, task, player) in grouped
-                       if enc == encoder_key})
-    if not row_keys:
-        continue
+def _regression_cells(pairs):
+    if not pairs:
+        return ['--', '--', '--']
+    mse_vals  = [p[0] for p in pairs]
+    base_vals = [p[1] for p in pairs]
+    return [_latex_cell(mse_vals), _latex_cell(base_vals), _imp_cell(mse_vals, base_vals)]
 
-    if current_encoder is not None:
-        print(r'\midrule')
-    current_encoder = encoder_key
 
-    for r_idx, (task, player) in enumerate(row_keys):
-        encoder_col = (r'{\textbf{' + encoder_display + r'}}') if r_idx == 0 else ''
-        task_col = f"{task} (p{player})" if player is not None else task
-        game_cells = []
-        for game in GAME_ORDER:
-            pairs = grouped[(encoder_key, task, player)].get(game, [])
-            if not pairs:
-                game_cells += ['--', '--', '--']
-            else:
-                mse_vals  = [p[0] for p in pairs]
-                base_vals = [p[1] for p in pairs]
-                game_cells += [
-                    _latex_cell(mse_vals),
-                    _latex_cell(base_vals),
-                    _imp_cell(mse_vals, base_vals),
-                ]
-        # columns: Encoder & Task & K_mse & K_base & K_imp & & L_mse & L_base & L_imp
-        cols = [encoder_col, task_col] + game_cells[:3] + [''] + game_cells[3:]
-        print(' & '.join(cols) + r' \\')
+def _task_e_cells(pairs):
+    if not pairs:
+        return ['--', '--', '--', '--']
+    mse_vals     = [p[0] for p in pairs]
+    base_vals    = [p[1] for p in pairs]
+    exploit_vals = [p[2] for p in pairs if p[2] is not None]
+    exploit_cell = _latex_cell(exploit_vals) if exploit_vals else '--'
+    return [
+        _latex_cell(mse_vals),
+        _latex_cell(base_vals),
+        _abs_imp_cell(mse_vals, base_vals),
+        exploit_cell,
+    ]
+
+
+def _emit_encoder_rows(task_filter_fn, game_cells_fn):
+    """Emit LaTeX rows for tasks matching task_filter_fn (no header, no tabular wrapper)."""
+    current_encoder = None
+    for encoder_key, encoder_display_base in ENCODER_ORDER:
+        row_keys = sorted({(tid, task, player, randall)
+                           for (enc, tid, task, player, randall) in grouped
+                           if enc == encoder_key and task_filter_fn(tid)})
+        if not row_keys:
+            continue
+        if current_encoder is not None:
+            print(r'\midrule')
+        current_encoder = encoder_key
+        for r_idx, (tid, task, player, randall) in enumerate(row_keys):
+            encoder_col = (r'{\textbf{' + encoder_display_base + r'}}') if r_idx == 0 else ''
+            rl_tag = ' (+RL)' if randall else (' (-RL)' if randall is not None else '')
+            task_col = f"{task} (p{player}){rl_tag}" if player is not None else f"{task}{rl_tag}"
+            game_cells = []
+            for game in GAME_ORDER:
+                pairs = grouped[(encoder_key, tid, task, player, randall)].get(game, [])
+                game_cells += game_cells_fn(pairs)
+            mid = len(game_cells) // 2
+            cols = [encoder_col, task_col] + game_cells[:mid] + [''] + game_cells[mid:]
+            print(' & '.join(cols) + r' \\')
+
+
+# ── LaTeX table 1: Tasks A–D (regression, percent improvement) ───────────────
+print('\n% Tasks A–D')
+_emit_encoder_rows(lambda tid: tid in ('A', 'B', 'C', 'D'), _regression_cells)
+
+# ── LaTeX table 2: Task E (best-response, absolute improvement + exploitability)
+print('\n% Task E (displayed as Task D)')
+_emit_encoder_rows(lambda tid: tid == 'E', _task_e_cells)
