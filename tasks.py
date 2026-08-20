@@ -531,6 +531,11 @@ def run_task_f(
     result = solver.solve_best_of_restarts(score)
 
     if config.posttrain:
+        # Original pretraining rows, kept fixed so continue-training on the
+        # visited pairs doesn't catastrophically forget the pool fit.
+        X_pre = predictor._prepare_training_data()
+        y_pre = predictor.ground_truth_payoffs
+
         for _ in range(config.posttrain_rounds):
             # gather decoded value targets for a budget-subsample of visited pairs
             visited = result.visited
@@ -542,8 +547,10 @@ def run_task_f(
                 target = get_expected_payoffs(game, p1_decoder(e1), p2_decoder(e2))
                 X_new.append(np.concatenate([e1, e2]))
                 y_new.append(target)
+            X_all = np.concatenate([X_pre, np.array(X_new)], axis=0)
+            y_all = np.concatenate([y_pre, np.array(y_new)], axis=0)
             continue_train_value_model(
-                predictor.trainer.model, np.array(X_new), np.array(y_new),
+                predictor.trainer.model, X_all, y_all,
                 epochs=config.posttrain_epochs, lr=config.posttrain_lr, device=device)
             result = solver.solve_best_of_restarts(score)
 
