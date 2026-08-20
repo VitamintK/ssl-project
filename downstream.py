@@ -1391,3 +1391,18 @@ class BestResponseLearner:
         return results
 
 
+def compute_nash_conv(game, p1_policy, p2_policy) -> float:
+    """NashConv of the joint profile (p1_policy plays player 0, p2_policy plays player 1)."""
+    from open_spiel.python import policy as policy_lib
+    from open_spiel.python.algorithms import exploitability as _exploitability
+
+    joint = policy_lib.TabularPolicy(game)
+    for state in joint.states:
+        pid = state.current_player()
+        src = p1_policy if pid == 0 else p2_policy
+        probs = src.action_probabilities(state)
+        row = joint.action_probability_array[joint.state_index(state)]
+        row[:] = 0.0
+        for action, p in probs.items():
+            row[action] = p
+    return float(_exploitability.nash_conv(game, joint))
