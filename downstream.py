@@ -15,6 +15,7 @@ from abc import ABC, abstractmethod
 import copy
 import os
 import time
+from dataclasses import dataclass
 from typing import List, Callable, Any, Optional, Literal
 from tqdm import tqdm
 
@@ -1406,3 +1407,82 @@ def compute_nash_conv(game, p1_policy, p2_policy) -> float:
         for action, p in probs.items():
             row[action] = p
     return float(_exploitability.nash_conv(game, joint))
+
+
+@dataclass
+class SolveResult:
+    e_p1: np.ndarray
+    e_p2: np.ndarray
+    value: float
+    visited: list  # list[tuple[np.ndarray, np.ndarray]]
+
+
+class EmbeddingEquilibriumSolver:
+    """Two-timescale gradient descent-ascent on a frozen value model, in embedding space.
+
+    Player 0 (P1) maximizes V; player 1 (P2) minimizes V.
+    """
+
+    def __init__(self, value_model, pool_p1, pool_p2, config, device="cpu"):
+        self.model = value_model.to(device).eval()
+        for p in self.model.parameters():
+            p.requires_grad_(False)
+        self.device = device
+        self.config = config
+        self.pool_p1 = np.asarray(pool_p1, dtype=np.float32)
+        self.pool_p2 = np.asarray(pool_p2, dtype=np.float32)
+        self.d1 = self.pool_p1.shape[1]
+        self.d2 = self.pool_p2.shape[1]
+        self.lo1 = torch.tensor(self.pool_p1.min(0), device=device)
+        self.hi1 = torch.tensor(self.pool_p1.max(0), device=device)
+        self.lo2 = torch.tensor(self.pool_p2.min(0), device=device)
+        self.hi2 = torch.tensor(self.pool_p2.max(0), device=device)
+
+    def _value(self, e1, e2):
+        return self.model(torch.cat([e1, e2]).unsqueeze(0)).squeeze(0)
+
+    def _clamp(self, e, lo, hi):
+        if self.config.bound_embeddings:
+            return torch.max(torch.min(e, hi), lo)
+        return e
+
+    def solve(self, init_p1=None, init_p2=None) -> SolveResult:
+        cfg = self.config
+        rng = np.random
+        if init_p1 is None:
+            init_p1 = self.pool_p1[rng.randint(len(self.pool_p1))]
+        if init_p2 is None:
+            init_p2 = self.pool_p2[rng.randint(len(self.pool_p2))]
+        e1 = torch.tensor(np.asarray(init_p1, np.float32), device=self.device, requires_grad=True)
+        e2 = torch.tensor(np.asarray(init_p2, np.float32), device=self.device, requires_grad=True)
+        visited = []
+        for _ in range(cfg.outer_steps):
+            # inner loop: P2 minimizes V (fast)
+            for _ in range(cfg.inner_steps):
+                v = self._value(e1, e2)
+                (g2,) = torch.autograd.grad(v, e2)
+                with torch.no_grad():
+                    e2 = self._clamp(e2 - cfg.lr_p2 * g2, self.lo2, self.hi2)
+                e2.requires_grad_(True)
+            # outer step: P1 maximizes V (slow)
+            v = self._value(e1, e2)
+            (g1,) = torch.autograd.grad(v, e1)
+            with torch.no_grad():
+                e1 = self._clamp(e1 + cfg.lr_p1 * g1, self.lo1, self.hi1)
+            e1.requires_grad_(True)
+            visited.append((e1.detach().cpu().numpy().copy(),
+                            e2.detach().cpu().numpy().copy()))
+        with torch.no_grad():
+            final_v = float(self._value(e1, e2))
+        return SolveResult(e1.detach().cpu().numpy(), e2.detach().cpu().numpy(),
+                           final_v, visited)
+
+    def solve_best_of_restarts(self, score_fn) -> SolveResult:
+        """Run num_restarts solves; return the result minimizing score_fn(result) (lower=better)."""
+        best, best_score = None, float("inf")
+        for _ in range(self.config.num_restarts):
+            res = self.solve()
+            s = score_fn(res)
+            if s < best_score:
+                best, best_score = res, s
+        return best
