@@ -175,6 +175,50 @@ class TaskEConfig:
         if self.epochs < 1:
             raise ValueError(f"epochs must be >= 1, got {self.epochs}")
 
+@dataclass
+class TaskFConfig:
+    """
+    Configuration for Task F: find equilibria by descent-ascent in embedding space.
+
+    Trains a differentiable value function over embedding pairs, runs two-timescale
+    gradient descent-ascent in embedding space, decodes the result to policies, and
+    evaluates NashConv. Optionally posttrains the value function on visited pairs.
+    """
+    model_config: ModelConfig = field(default_factory=lambda: ModelConfig(model_type="mlp"))
+    validation_split: float = 0.2
+    # descent-ascent
+    outer_steps: int = 200
+    inner_steps: int = 5
+    lr_p1: float = 1e-2
+    lr_p2: float = 5e-2
+    num_restarts: int = 4
+    bound_embeddings: bool = True
+    # posttraining
+    posttrain: bool = False
+    posttrain_rounds: int = 2
+    posttrain_budget: int = 256
+    posttrain_epochs: int = 200
+    posttrain_lr: float = 1e-3
+    # eval
+    nashconv_baseline_samples: int = 8
+
+    def __post_init__(self):
+        if self.model_config.model_type not in ("mlp", "linear"):
+            raise ValueError(
+                "Task F requires a differentiable value function "
+                f"(model_type must be 'mlp' or 'linear'), got {self.model_config.model_type!r}."
+            )
+        if not 0 < self.validation_split < 1:
+            raise ValueError(f"validation_split must be in (0, 1), got {self.validation_split}")
+        for name in ("outer_steps", "inner_steps", "num_restarts",
+                     "posttrain_rounds", "posttrain_budget", "posttrain_epochs",
+                     "nashconv_baseline_samples"):
+            if getattr(self, name) < 1:
+                raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}")
+        for name in ("lr_p1", "lr_p2", "posttrain_lr"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive, got {getattr(self, name)}")
+
 def config_to_dict(config) -> dict:
     """
     Convert a config object to a dictionary for serialization.
