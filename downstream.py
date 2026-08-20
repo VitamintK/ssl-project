@@ -1392,6 +1392,33 @@ class BestResponseLearner:
         return results
 
 
+def continue_train_value_model(model, X, y, epochs, lr, device="cpu"):
+    """In-place MSE SGD on a torch value model. X: (n, D), y: (n,).
+
+    NOTE: EmbeddingEquilibriumSolver.__init__ freezes the value model's
+    parameters (requires_grad_(False)) since it only needs gradients w.r.t.
+    the embeddings, not the model weights. run_task_f passes the same model
+    object (predictor.trainer.model) into the solver, so by the time this
+    function is later called to posttrain that model, its parameters are
+    frozen. Re-enable gradients here before optimizing, or Adam.step() will
+    silently be a no-op.
+    """
+    model.to(device)
+    for p in model.parameters():
+        p.requires_grad_(True)
+    model.train()
+    Xt = torch.as_tensor(np.asarray(X), dtype=torch.float32, device=device)
+    yt = torch.as_tensor(np.asarray(y), dtype=torch.float32, device=device)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    loss_fn = nn.MSELoss()
+    for _ in range(epochs):
+        opt.zero_grad()
+        loss = loss_fn(model(Xt), yt)
+        loss.backward()
+        opt.step()
+    model.eval()
+
+
 def compute_nash_conv(game, p1_policy, p2_policy) -> float:
     """NashConv of the joint profile (p1_policy plays player 0, p2_policy plays player 1)."""
     from open_spiel.python import policy as policy_lib

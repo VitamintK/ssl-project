@@ -20,13 +20,16 @@ from typing import List
 from omegaconf import OmegaConf
 from open_spiel.python.policy import Policy, UniformRandomPolicy
 
-from config import TaskAConfig, TaskBConfig, TaskCConfig, TaskDConfig, TaskEConfig, ExperimentInfo, config_to_dict
+from config import TaskAConfig, TaskBConfig, TaskCConfig, TaskDConfig, TaskEConfig, TaskFConfig, ExperimentInfo, config_to_dict
 from downstream import (
     BestResponseLearner,
     PayoffPredictor,
     StatePayoffPredictor,
-    ExploitabilityPredictor
+    ExploitabilityPredictor,
+    EmbeddingEquilibriumSolver,
+    compute_nash_conv,
 )
+from utils import get_expected_payoffs
 
 
 logger = logging.getLogger("ssl_project")
@@ -491,3 +494,62 @@ def run_task_e(
     if config.compare_to_control:
         result['control_metrics'] = control_metrics
     return result
+
+
+def run_task_f(
+    game,
+    p1_policies, p1_embeddings,
+    p2_policies, p2_embeddings,
+    p1_decoder, p2_decoder,
+    config: TaskFConfig,
+    experiment_info: ExperimentInfo,
+    device: str = "cpu",
+) -> dict:
+    """Task F: find an equilibrium by descent-ascent in embedding space; report NashConv."""
+    logger.info(f"Running Task F: {experiment_info.label_string}")
+
+    # 1. Pretrain the value function V(e_p1, e_p2) (Task B).
+    predictor = PayoffPredictor(
+        game=game, p1_policies=p1_policies, p2_policies=p2_policies,
+        p1_embeddings=p1_embeddings, p2_embeddings=p2_embeddings,
+        model_config=config.model_config, device=device)
+    predictor.compute_ground_truth_payoffs()
+    predictor.train_with_agent_level_split(config.validation_split)
+    val_metrics = predictor.evaluate(eval_set="val")
+
+    pool_p1 = np.array(p1_embeddings)
+    pool_p2 = np.array(p2_embeddings)
+
+    # 2. Solve for an equilibrium, keeping the restart with lowest decoded NashConv.
+    solver = EmbeddingEquilibriumSolver(
+        predictor.trainer.model, pool_p1, pool_p2, config, device=device)
+
+    def score(res):
+        return compute_nash_conv(game, p1_decoder(res.e_p1), p2_decoder(res.e_p2))
+
+    result = solver.solve_best_of_restarts(score)
+
+    # 3. Evaluate the recovered profile.
+    p1_star = p1_decoder(result.e_p1)
+    p2_star = p2_decoder(result.e_p2)
+    nashconv = compute_nash_conv(game, p1_star, p2_star)
+    sampled_payoff = get_expected_payoffs(game, p1_star, p2_star)
+
+    # random-embedding-pair baseline
+    baseline_vals = []
+    for _ in range(config.nashconv_baseline_samples):
+        e1 = pool_p1[np.random.randint(len(pool_p1))]
+        e2 = pool_p2[np.random.randint(len(pool_p2))]
+        baseline_vals.append(compute_nash_conv(game, p1_decoder(e1), p2_decoder(e2)))
+    nashconv_baseline = float(np.mean(baseline_vals))
+
+    logger.info(f"Task F NashConv: {nashconv:.6f}  baseline: {nashconv_baseline:.6f}")
+
+    return {
+        "nashconv": float(nashconv),
+        "nashconv_baseline": nashconv_baseline,
+        "value_at_star": float(result.value),
+        "sampled_payoff_at_star": float(sampled_payoff),
+        "val_metrics": val_metrics,
+        "config": config_to_dict(config),
+    }
