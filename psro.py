@@ -1070,6 +1070,22 @@ def make_neupl_policies(
     )
 
 
+def neupl_decoder(game, agent, embedding, player_id: int, use_observation: bool = False):
+    """Embedding -> policy for NeuPL: condition `agent` on `embedding`.
+
+    `agent` is a loaded PPOConditionedOnPolicyRepresentationAgent (e.g. obtained from an
+    existing policy via `policy._ppo_agent`). `embedding` may be shape (D,) or (1, D);
+    NeuPL conditioning expects (1, D).
+    """
+    from utils import PPONeuplAgentPolicy
+    emb = embedding if isinstance(embedding, torch.Tensor) else torch.tensor(embedding, dtype=torch.float32)
+    emb = emb.float()
+    if emb.ndim == 1:
+        emb = emb.unsqueeze(0)
+    return PPONeuplAgentPolicy(game, agent, player_id,
+                               use_observation=use_observation, embedding=emb)
+
+
 if __name__ == '__main__':
     import argparse
 
