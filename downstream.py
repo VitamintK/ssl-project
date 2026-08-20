@@ -1459,6 +1459,7 @@ class SolveResult:
     e_p2: np.ndarray
     value: float
     visited: list  # list[tuple[np.ndarray, np.ndarray]]
+    stats: list = None  # list[dict]: per inner-step records, e.g. {'outer_step', 'inner_step', 'v'}
 
 
 class EmbeddingEquilibriumSolver:
@@ -1500,10 +1501,13 @@ class EmbeddingEquilibriumSolver:
         e1 = torch.tensor(np.asarray(init_p1, np.float32), device=self.device, requires_grad=True)
         e2 = torch.tensor(np.asarray(init_p2, np.float32), device=self.device, requires_grad=True)
         visited = []
-        for _ in range(cfg.outer_steps):
+        stats = []  # generic per-step log; currently records v at each inner step
+        for outer_step in range(cfg.outer_steps):
             # inner loop: P2 minimizes V (fast)
-            for _ in range(cfg.inner_steps):
+            for inner_step in range(cfg.inner_steps):
                 v = self._value(e1, e2)
+                stats.append({'outer_step': outer_step, 'inner_step': inner_step,
+                              'v': float(v.detach())})
                 (g2,) = torch.autograd.grad(v, e2)
                 with torch.no_grad():
                     e2 = self._clamp(e2 - cfg.lr_p2 * g2, self.lo2, self.hi2)
@@ -1519,14 +1523,67 @@ class EmbeddingEquilibriumSolver:
         with torch.no_grad():
             final_v = float(self._value(e1, e2))
         return SolveResult(e1.detach().cpu().numpy(), e2.detach().cpu().numpy(),
-                           final_v, visited)
+                           final_v, visited, stats)
 
     def solve_best_of_restarts(self, score_fn) -> SolveResult:
-        """Run num_restarts solves; return the result minimizing score_fn(result) (lower=better)."""
+        """Run num_restarts solves; return the result minimizing score_fn(result) (lower=better).
+
+        The per-solve stats logs for every restart of the most recent call are kept on
+        ``self.last_restart_stats`` (one element per restart) for inspection/plotting.
+        """
         best, best_score = None, float("inf")
+        self.last_restart_stats = []
         for _ in range(self.config.num_restarts):
             res = self.solve()
+            self.last_restart_stats.append(res.stats)
             s = score_fn(res)
             if s < best_score:
                 best, best_score = res, s
         return best
+
+
+def plot_solve_value_curves(restart_stats, save_path, title=None):
+    """Plot the value trajectory of each solve run, one subplot per restart.
+
+    Args:
+        restart_stats: list where each element is one solve()'s stats list (dicts with
+            'outer_step', 'inner_step', 'v'); e.g. ``solver.last_restart_stats``.
+        save_path: file path to write the PNG to.
+        title: optional overall figure title.
+
+    Returns:
+        The save_path written, or None if there was nothing to plot.
+    """
+    import math
+    from pathlib import Path as _Path
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    runs = [s for s in restart_stats if s]
+    if not runs:
+        return None
+
+    n = len(runs)
+    ncols = 2 if n > 1 else 1
+    nrows = math.ceil(n / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 3.5 * nrows), squeeze=False)
+    for k, stats in enumerate(runs):
+        ax = axes[k // ncols][k % ncols]
+        vs = [rec['v'] for rec in stats]
+        ax.plot(range(len(vs)), vs, lw=1)
+        ax.set_title(f"restart {k}")
+        ax.set_xlabel("inner step")
+        ax.set_ylabel("v")
+        ax.grid(True, alpha=0.3)
+    # hide any unused axes in the grid
+    for k in range(n, nrows * ncols):
+        axes[k // ncols][k % ncols].axis("off")
+    if title:
+        fig.suptitle(title)
+    fig.tight_layout()
+
+    _Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=120)
+    plt.close(fig)
+    return save_path

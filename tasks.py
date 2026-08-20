@@ -29,6 +29,7 @@ from downstream import (
     EmbeddingEquilibriumSolver,
     compute_nash_conv,
     continue_train_value_model,
+    plot_solve_value_curves,
 )
 from utils import get_expected_payoffs
 
@@ -554,6 +555,22 @@ def run_task_f(
                 epochs=config.posttrain_epochs, lr=config.posttrain_lr, device=device)
             result = solver.solve_best_of_restarts(score)
 
+    # Plot the value trajectory of each restart of the final solve (one subplot per run).
+    solve_curves_path = None
+    try:
+        import re as _re
+        from pathlib import Path as _Path
+        label = experiment_info.label_string
+        safe_label = _re.sub(r"[^0-9A-Za-z._-]+", "_", label).strip("_") or "task_f"
+        solve_curves_path = str(_Path("figures") / "task_f" / f"{safe_label}_solve_curves.png")
+        plot_solve_value_curves(
+            solver.last_restart_stats, solve_curves_path,
+            title=f"Task F value curves — {label}")
+        logger.info(f"Saved solve value curves to {solve_curves_path}")
+    except Exception as exc:  # plotting is best-effort; never fail the task on it
+        logger.warning(f"Could not plot solve value curves: {exc}")
+        solve_curves_path = None
+
     # 3. Evaluate the recovered profile.
     p1_star = p1_decoder(result.e_p1)
     p2_star = p2_decoder(result.e_p2)
@@ -578,4 +595,5 @@ def run_task_f(
         "val_metrics": val_metrics,
         "config": config_to_dict(config),
         "posttrain_rounds": config.posttrain_rounds if config.posttrain else 0,
+        "solve_curves_path": solve_curves_path,
     }

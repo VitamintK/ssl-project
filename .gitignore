@@ -70,3 +70,6 @@ results/test/neupl/ppo/hs256/kuhn_poker/2026-04-16_16-49-43-810980_e89/
 results/test/neupl/ppo/hs256/kuhn_poker/2026-04-16_16-53-14-180589_b35/
 results/test/neupl/ppo/hs256/kuhn_poker/2026-04-16_16-53-45-891456_174/
 results/test/neupl/ppo/hs256/kuhn_poker/2026-04-16_17-01-23-627658_30c/
+
+# Task F generated value-curve plots
+figures/task_f/

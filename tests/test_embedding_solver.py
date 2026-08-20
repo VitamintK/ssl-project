@@ -28,6 +28,32 @@ def test_bounding_keeps_iterates_in_pool_range():
     assert len(res.visited) == 50
 
 
+def test_solve_logs_value_stats():
+    d = 2
+    pool = np.array([[-1.0, -1.0], [1.0, 1.0]])
+    cfg = TaskFConfig(model_config=ModelConfig(model_type="mlp"),
+                      outer_steps=6, inner_steps=3, num_restarts=1, bound_embeddings=True)
+    solver = EmbeddingEquilibriumSolver(_Bilinear(d), pool, pool, cfg, device="cpu")
+    res = solver.solve()
+    # one record per inner step: outer_steps * inner_steps
+    assert len(res.stats) == 6 * 3
+    first = res.stats[0]
+    assert set(first.keys()) == {"outer_step", "inner_step", "v"}
+    assert first["outer_step"] == 0 and first["inner_step"] == 0
+    assert isinstance(first["v"], float)
+
+
+def test_solve_best_of_restarts_keeps_per_run_stats():
+    d = 2
+    pool = np.array([[-1.0, -1.0], [1.0, 1.0]])
+    cfg = TaskFConfig(model_config=ModelConfig(model_type="mlp"),
+                      outer_steps=4, inner_steps=2, num_restarts=3, bound_embeddings=True)
+    solver = EmbeddingEquilibriumSolver(_Bilinear(d), pool, pool, cfg, device="cpu")
+    solver.solve_best_of_restarts(lambda r: abs(r.value))
+    assert len(solver.last_restart_stats) == 3
+    assert all(len(run) == 4 * 2 for run in solver.last_restart_stats)
+
+
 def test_solver_moves_toward_saddle():
     d = 2
     pool = np.array([[-2.0, -2.0], [2.0, 2.0]])
