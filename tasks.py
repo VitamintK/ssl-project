@@ -28,6 +28,7 @@ from downstream import (
     ExploitabilityPredictor,
     EmbeddingEquilibriumSolver,
     compute_nash_conv,
+    continue_train_value_model,
 )
 from utils import get_expected_payoffs
 
@@ -529,6 +530,23 @@ def run_task_f(
 
     result = solver.solve_best_of_restarts(score)
 
+    if config.posttrain:
+        for _ in range(config.posttrain_rounds):
+            # gather decoded value targets for a budget-subsample of visited pairs
+            visited = result.visited
+            if len(visited) > config.posttrain_budget:
+                idx = np.random.choice(len(visited), config.posttrain_budget, replace=False)
+                visited = [visited[i] for i in idx]
+            X_new, y_new = [], []
+            for e1, e2 in visited:
+                target = get_expected_payoffs(game, p1_decoder(e1), p2_decoder(e2))
+                X_new.append(np.concatenate([e1, e2]))
+                y_new.append(target)
+            continue_train_value_model(
+                predictor.trainer.model, np.array(X_new), np.array(y_new),
+                epochs=config.posttrain_epochs, lr=config.posttrain_lr, device=device)
+            result = solver.solve_best_of_restarts(score)
+
     # 3. Evaluate the recovered profile.
     p1_star = p1_decoder(result.e_p1)
     p2_star = p2_decoder(result.e_p2)
@@ -552,4 +570,5 @@ def run_task_f(
         "sampled_payoff_at_star": float(sampled_payoff),
         "val_metrics": val_metrics,
         "config": config_to_dict(config),
+        "posttrain_rounds": config.posttrain_rounds if config.posttrain else 0,
     }

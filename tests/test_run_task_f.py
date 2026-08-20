@@ -32,3 +32,32 @@ def test_run_task_f_smoke_identity_source():
     out = run_task_f(game, p1_pol, p1_emb, p2_pol, p2_emb, p1_dec, p2_dec, cfg, info, "cpu")
     assert "nashconv" in out and out["nashconv"] >= 0.0
     assert "nashconv_baseline" in out
+
+
+def test_run_task_f_posttraining_runs():
+    import pyspiel
+    from config import TaskFConfig, ModelConfig, ExperimentInfo
+    from utils import make_diverse_random_kuhn_poker_layer_init, PPOAgentPolicy
+    from iig_rl_benchmark.algorithms.ppo import ppo
+    from weight_autoencoder import ppo_agent_to_vector, vector_to_ppo_agent
+    from tasks import run_task_f
+    game = pyspiel.load_game("kuhn_poker")
+    li = make_diverse_random_kuhn_poker_layer_init(game)
+    mk = lambda: ppo.PPOAgent(game.num_distinct_actions(),
+                              game.information_state_tensor_shape(), "cpu", li, 256)
+    p1_agents = [mk() for _ in range(6)]
+    p2_agents = [mk() for _ in range(6)]
+    p1_pol = [PPOAgentPolicy(game, a, 0, False) for a in p1_agents]
+    p2_pol = [PPOAgentPolicy(game, a, 1, False) for a in p2_agents]
+    p1_emb = [ppo_agent_to_vector(a).detach().numpy() for a in p1_agents]
+    p2_emb = [ppo_agent_to_vector(a).detach().numpy() for a in p2_agents]
+    p1_dec = lambda e, t=p1_agents[0]: PPOAgentPolicy(game, vector_to_ppo_agent(t, e), 0, False)
+    p2_dec = lambda e, t=p2_agents[0]: PPOAgentPolicy(game, vector_to_ppo_agent(t, e), 1, False)
+    cfg = TaskFConfig(
+        model_config=ModelConfig(model_type="mlp", num_epochs=30, early_stopping_patience=10),
+        outer_steps=4, inner_steps=2, num_restarts=1, nashconv_baseline_samples=1,
+        posttrain=True, posttrain_rounds=1, posttrain_budget=4, posttrain_epochs=5)
+    info = ExperimentInfo("kuhn identity Task F posttrain", embedding_type="identity", task_id="F")
+    out = run_task_f(game, p1_pol, p1_emb, p2_pol, p2_emb, p1_dec, p2_dec, cfg, info, "cpu")
+    assert out["posttrain_rounds"] == 1
+    assert "nashconv" in out
