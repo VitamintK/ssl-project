@@ -1,4 +1,5 @@
 import argparse
+import copy
 import math
 from dataclasses import dataclass
 from typing import Callable, Iterable, Sequence, Union
@@ -183,10 +184,37 @@ class WeightAutoencoder:
                 return embedding.squeeze(0)
         return encoder_fn
 
+    def get_decoder(self, game, player_id: int, template_agent, device: str = "cpu"):
+        """Return decode(embedding) -> PPOAgentPolicy (inverse of get_encoder)."""
+        from utils import PPOAgentPolicy
+        self.autoencoder.eval()
+        decoder = self.autoencoder.decoder.to(device)
+
+        def decode(embedding):
+            with torch.no_grad():
+                z = embedding if isinstance(embedding, torch.Tensor) else torch.tensor(embedding)
+                z = z.float().to(device)
+                if z.ndim == 1:
+                    z = z.unsqueeze(0)
+                weight_vector = decoder(z).squeeze(0)
+            agent = vector_to_ppo_agent(template_agent, weight_vector)
+            return PPOAgentPolicy(game, agent, player_id, False)
+
+        return decode
+
 def ppo_agent_to_vector(ppo_agent: ppo.PPOAgent) -> torch.Tensor:
     parameters = [param.detach() for param in ppo_agent.actor.parameters()]
     parameters = nn.utils.parameters_to_vector(parameters)
     return parameters
+
+def vector_to_ppo_agent(template_agent, vector):
+    """Inverse of ppo_agent_to_vector: load `vector` into a copy of template_agent's actor."""
+    agent = copy.deepcopy(template_agent)
+    device = next(agent.actor.parameters()).device
+    vec = vector if isinstance(vector, torch.Tensor) else torch.tensor(vector)
+    vec = vec.detach().float().reshape(-1).to(device)
+    torch.nn.utils.vector_to_parameters(vec, agent.actor.parameters())
+    return agent
 
 def _split_lengths(total_len: int, val_split: float) -> tuple[int, int]:
 

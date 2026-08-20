@@ -302,6 +302,25 @@ class FunctionalEncoderAdapter:
 
         return encoder_fn
 
+    def get_decoder(self, game, player_id: int, template_agent, device: str = "cpu"):
+        """Return decode(embedding) -> PPOAgentPolicy (inverse of get_encoder)."""
+        from utils import PPOAgentPolicy
+        from weight_autoencoder import vector_to_ppo_agent
+        self.model.eval()
+        decoder = self.model.decoder.to(device)
+
+        def decode(embedding):
+            with torch.no_grad():
+                z = embedding if isinstance(embedding, torch.Tensor) else torch.tensor(embedding)
+                z = z.float().to(device)
+                if z.ndim == 1:
+                    z = z.unsqueeze(0)
+                weight_vector = decoder(z).squeeze(0)
+            agent = vector_to_ppo_agent(template_agent, weight_vector)
+            return PPOAgentPolicy(game, agent, player_id, False)
+
+        return decode
+
 
 def _hidden_dims_arg(value: str) -> tuple[int, ...]:
     dims = [int(v.strip()) for v in value.split(",") if v.strip()]
