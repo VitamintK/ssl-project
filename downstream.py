@@ -431,7 +431,8 @@ class PayoffPredictor:
         p1_embeddings: np.ndarray,
         p2_embeddings: np.ndarray,
         model_config: ModelConfig,
-        device: str = "cpu"
+        device: str = "cpu",
+        num_pairs: Optional[int] = None,
     ):
         """
         Initialize PayoffPredictor.
@@ -444,6 +445,8 @@ class PayoffPredictor:
             p2_embeddings: P2 agent embeddings
             model_config: Model configuration
             device: Device for computation
+            num_pairs: If set, compute ground truth for a random sample of this many
+                (P1, P2) pairs instead of the full N x M grid. None (default) uses all pairs.
         """
         # Domain setup
         self.game = game
@@ -451,6 +454,7 @@ class PayoffPredictor:
         self.p2_policies = p2_policies
         self.p1_embeddings = np.array(p1_embeddings)
         self.p2_embeddings = np.array(p2_embeddings)
+        self.num_pairs = num_pairs
 
         # Create trainer via composition
         embedding_dim = self.p1_embeddings.shape[1] + self.p2_embeddings.shape[1]
@@ -461,16 +465,29 @@ class PayoffPredictor:
         self.pair_indices = None  # Will be set in compute_ground_truth_payoffs
 
     def compute_ground_truth_payoffs(self):
-        """Compute ground truth payoffs for all P1-P2 agent pairs."""
-        print(f"Computing ground truth payoffs for {len(self.p1_policies)} x {len(self.p2_policies)} agent pairs...")
+        """Compute ground truth payoffs for P1-P2 agent pairs.
+
+        By default every (P1, P2) pair in the N x M grid is evaluated. If ``num_pairs``
+        was set, a random sample of that many distinct pairs is evaluated instead.
+        """
+        n_p1, n_p2 = len(self.p1_policies), len(self.p2_policies)
+        total_pairs = n_p1 * n_p2
+
+        if self.num_pairs is None or self.num_pairs >= total_pairs:
+            pairs = [(p1_idx, p2_idx) for p1_idx in range(n_p1) for p2_idx in range(n_p2)]
+        else:
+            # Sample distinct pairs by flat index to avoid materializing the full grid.
+            flat = np.random.choice(total_pairs, size=self.num_pairs, replace=False)
+            pairs = [(int(f // n_p2), int(f % n_p2)) for f in flat]
+
+        print(f"Computing ground truth payoffs for {len(pairs)} of {total_pairs} "
+              f"({n_p1} x {n_p2}) agent pairs...")
         payoffs = []
         self.pair_indices = []
-
-        for p1_idx, p1_policy in enumerate(tqdm(self.p1_policies, desc="P1 policies")):
-            for p2_idx, p2_policy in enumerate(self.p2_policies):
-                payoff = get_expected_payoffs(self.game, p1_policy, p2_policy)
-                payoffs.append(payoff)
-                self.pair_indices.append((p1_idx, p2_idx))
+        for p1_idx, p2_idx in tqdm(pairs, desc="Agent pairs"):
+            payoff = get_expected_payoffs(self.game, self.p1_policies[p1_idx], self.p2_policies[p2_idx])
+            payoffs.append(payoff)
+            self.pair_indices.append((p1_idx, p2_idx))
 
         self.ground_truth_payoffs = np.array(payoffs)
         return self.ground_truth_payoffs

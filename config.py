@@ -186,6 +186,8 @@ class TaskFConfig:
     """
     model_config: ModelConfig = field(default_factory=lambda: ModelConfig(model_type="mlp"))
     validation_split: float = 0.2
+    # value-function pretraining: if set, sample this many (P1, P2) pairs instead of the full N x M grid
+    num_pairs: Optional[int] = None
     # descent-ascent
     outer_steps: int = 200
     inner_steps: int = 5
@@ -215,6 +217,8 @@ class TaskFConfig:
                      "nashconv_baseline_samples"):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}")
+        if self.num_pairs is not None and self.num_pairs < 1:
+            raise ValueError(f"num_pairs must be >= 1 or None, got {self.num_pairs}")
         for name in ("lr_p1", "lr_p2", "posttrain_lr"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive, got {getattr(self, name)}")

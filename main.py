@@ -1131,6 +1131,7 @@ def _run_experiment(spec: dict) -> tuple:
                                 num_epochs=ov.get('model_num_epochs', 5000))
         config = TaskFConfig(
             model_config=model_cfg,
+            num_pairs=ov.get('num_pairs', None),
             outer_steps=ov.get('outer_steps', 200),
             inner_steps=ov.get('inner_steps', 5),
             num_restarts=ov.get('num_restarts', 4),
@@ -1181,11 +1182,11 @@ if __name__ == "__main__":
     # exit()
 
     RUN_TASK_A = False
-    RUN_TASK_B = True
+    RUN_TASK_B = False
     RUN_TASK_C = False
     RUN_TASK_D = False
     RUN_TASK_E = False
-    RUN_TASK_F = False
+    RUN_TASK_F = True
 
     RUN_NEUPL = True
     RUN_PSRO = False

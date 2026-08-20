@@ -513,7 +513,7 @@ def run_task_f(
     predictor = PayoffPredictor(
         game=game, p1_policies=p1_policies, p2_policies=p2_policies,
         p1_embeddings=p1_embeddings, p2_embeddings=p2_embeddings,
-        model_config=config.model_config, device=device)
+        model_config=config.model_config, device=device, num_pairs=config.num_pairs)
     predictor.compute_ground_truth_payoffs()
     predictor.train_with_agent_level_split(config.validation_split)
     val_metrics = predictor.evaluate(eval_set="val")
