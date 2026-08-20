@@ -13,7 +13,7 @@ from datetime import datetime
 
 from open_spiel.python import policy as policy_lib
 from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
-from psro import load_ppo_agents_from_psro, make_neupl_policies, select_neupl_directory
+from psro import load_ppo_agents_from_psro, make_neupl_policies, select_neupl_directory, neupl_decoder
 from utils import PPOAgentPolicy, get_device_string, make_diverse_random_kuhn_poker_layer_init
 from functional_autoencoder import (
     TrainingConfig,
@@ -26,6 +26,7 @@ from weight_autoencoder import (
     AutoencoderConfig,
     WeightAutoencoder,
     ppo_agent_to_vector,
+    vector_to_ppo_agent,
     save_autoencoder,
     load_autoencoder,
 )
@@ -895,12 +896,17 @@ def get_policies_and_embeddings(game, player_id: int, ppo_agents: list[PPOAgent]
     encoder_fn = weight_autoencoder.get_encoder(device=device)
     embeddings = [encoder_fn(agent).detach().cpu().numpy() for agent in downstream_ppo_agents]
     policies = [PPOAgentPolicy(game, agent, player_id, False) for agent in downstream_ppo_agents]
-    return policies, embeddings, weight_autoencoder, downstream_ppo_agents[0]
+    # Decoder: embedding -> reconstructed weights -> policy (needs a template agent as the network mold).
+    decoder = weight_autoencoder.get_decoder(game, player_id, downstream_ppo_agents[0], device)
+    return policies, embeddings, decoder
 
 def get_policies_and_embeddings2(game, player_id: int, ppo_agents: list[PPOAgent], experiment_label: str, game_short_name: str, device: str):
     embeddings = [ppo_agent_to_vector(agent).detach().cpu().numpy() for agent in ppo_agents]
     policies = [PPOAgentPolicy(game, agent, player_id, False) for agent in ppo_agents]
-    return policies, embeddings, None, ppo_agents[0]
+    # Identity decoder: the embedding IS the actor weight vector, so load it straight into a template agent.
+    template_agent = ppo_agents[0]
+    decoder = lambda e, t=template_agent, pid=player_id: PPOAgentPolicy(game, vector_to_ppo_agent(t, e), pid, False)
+    return policies, embeddings, decoder
 
 
 def run_all():
@@ -1011,18 +1017,18 @@ def _run_experiment(spec: dict) -> tuple:
         )
         policies = [p_e[1] for p_e in policies_and_embeddings[player_id]]
         embeddings = [p_e[0].detach().cpu().numpy() for p_e in policies_and_embeddings[player_id]]
-        encoder = None
-        template_agent = None
+        # NeuPL decoder: condition the shared conditioned agent on the embedding (no weight reconstruction).
+        decoder = lambda e, a=policies[0]._ppo_agent, pid=player_id: neupl_decoder(game, a, e, pid)
     elif source == 'psro':
         model_dir = f"results/test/psro/ppo/hs256/{game_short_name}"
         ppo_agents = load_ppo_agents_from_psro(
             game_short_name=game_short_name, hidden_size=256, player_id=player_id, shuffle=True,
             device=policy_device)
         if embedding_type == 'identity':
-            policies, embeddings, encoder, template_agent = get_policies_and_embeddings2(
+            policies, embeddings, decoder = get_policies_and_embeddings2(
                 game, player_id, ppo_agents, "psro_" + game_short_name, game_short_name, device)
         else:
-            policies, embeddings, encoder, template_agent = get_policies_and_embeddings(
+            policies, embeddings, decoder = get_policies_and_embeddings(
                 game, player_id, ppo_agents, "psro_" + game_short_name, game_short_name, device)
     elif source == 'random':
         info_state_size = game.information_state_tensor_shape()
@@ -1031,41 +1037,39 @@ def _run_experiment(spec: dict) -> tuple:
         ppo_agents = [PPOAgent(num_actions, info_state_size, policy_device, layer_init, 256)
                       for _ in range(spec['N_random'])]
         if embedding_type == 'identity':
-            policies, embeddings, encoder, template_agent = get_policies_and_embeddings2(
+            policies, embeddings, decoder = get_policies_and_embeddings2(
                 game, player_id, ppo_agents, "ppo random " + game_short_name, game_short_name, device)
         else:
-            policies, embeddings, encoder, template_agent = get_policies_and_embeddings(
+            policies, embeddings, decoder = get_policies_and_embeddings(
                 game, player_id, ppo_agents, "ppo random " + game_short_name, game_short_name, device)
     else:
         raise ValueError(f"Unknown source: {source}")
 
-    # For Task B/F, also need the opposing player's policies and embeddings
-    p2_policies = p2_embeddings = None
-    p2_encoder = p2_template = None
+    # For Task B/F, also need the opposing player's policies and embeddings (and, for Task F, a decoder).
+    p2_policies = p2_embeddings = p2_decoder = None
     if task in ('b', 'f'):
         if source == 'neupl':
             p2_policies = [p_e[1] for p_e in policies_and_embeddings[1]]
             p2_embeddings = [p_e[0].detach().cpu().numpy() for p_e in policies_and_embeddings[1]]
-            p2_encoder = None
-            p2_template = None
+            p2_decoder = lambda e, a=p2_policies[0]._ppo_agent: neupl_decoder(game, a, e, 1)
         elif source == 'psro':
             ppo_agents_p2 = load_ppo_agents_from_psro(
                 game_short_name=game_short_name, hidden_size=256, player_id=1, shuffle=True,
                 device=policy_device)
             if embedding_type == 'identity':
-                p2_policies, p2_embeddings, p2_encoder, p2_template = get_policies_and_embeddings2(
+                p2_policies, p2_embeddings, p2_decoder = get_policies_and_embeddings2(
                     game, 1, ppo_agents_p2, "psro_" + game_short_name, game_short_name, device)
             else:
-                p2_policies, p2_embeddings, p2_encoder, p2_template = get_policies_and_embeddings(
+                p2_policies, p2_embeddings, p2_decoder = get_policies_and_embeddings(
                     game, 1, ppo_agents_p2, "psro_" + game_short_name, game_short_name, device)
         elif source == 'random':
             ppo_agents_p2 = [PPOAgent(num_actions, info_state_size, policy_device, layer_init, 256)
                               for _ in range(spec['N_random'])]
             if embedding_type == 'identity':
-                p2_policies, p2_embeddings, p2_encoder, p2_template = get_policies_and_embeddings2(
+                p2_policies, p2_embeddings, p2_decoder = get_policies_and_embeddings2(
                     game, 1, ppo_agents_p2, "ppo random " + game_short_name, game_short_name, device)
             else:
-                p2_policies, p2_embeddings, p2_encoder, p2_template = get_policies_and_embeddings(
+                p2_policies, p2_embeddings, p2_decoder = get_policies_and_embeddings(
                     game, 1, ppo_agents_p2, "ppo random " + game_short_name, game_short_name, device)
 
     # --- run task ---
@@ -1115,23 +1119,12 @@ def _run_experiment(spec: dict) -> tuple:
                             p2_policies=p2_policies, p2_embeddings=p2_embeddings,
                             config=config, experiment_info=experiment_info, device=device)
     elif task == 'f':
-        from config import TaskFConfig, ModelConfig
-        from psro import neupl_decoder
-        from weight_autoencoder import vector_to_ppo_agent
+        from config import TaskFConfig
         from tasks import run_task_f
-        from utils import PPOAgentPolicy
 
-        def make_decoder(src_encoder, src_template, src_policies, pid):
-            if source == 'neupl':
-                neupl_agent = src_policies[0]._ppo_agent
-                return lambda e: neupl_decoder(game, neupl_agent, e, pid)
-            if src_encoder is not None:  # reconstruction-autoencoder
-                return src_encoder.get_decoder(game, pid, src_template, device)
-            # identity
-            return lambda e: PPOAgentPolicy(game, vector_to_ppo_agent(src_template, e), pid, False)
-
-        p1_decoder = make_decoder(encoder, template_agent, policies, 0)
-        p2_decoder = make_decoder(p2_encoder, p2_template, p2_policies, 1)
+        # Decoders were built per-source during loading (autoencoder/identity in the loaders,
+        # NeuPL inline); consume them uniformly here.
+        p1_decoder = decoder
 
         ov = spec.get('task_f_overrides', {})
         model_cfg = ModelConfig(model_type=spec['predictor_type'],
