@@ -775,7 +775,31 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
                 f.write(json.dumps(record) + "\n")
             logger.info("  BRV per exploited policy (k=%s): %s",
                         k, "  ".join(f"E_{i}={v:.4f}" for i, v in enumerate(brvs)))
+            if debug:
+                _debug_aspro(k)
             _plot_brv(state.stats)
+
+        def _debug_aspro(k):
+            """Per exploited policy i (1..k): E's exact payoff vs each opponent X_j, that
+            opponent's current bandit probability, and E_i's EV against the mixture."""
+            from open_spiel.python.algorithms import expected_game_score
+
+            def _payoff_E_vs_X(i, j):
+                pair = [None, None]
+                pair[E], pair[X] = agents[E][i], agents[X][j]
+                return expected_game_score.policy_value(game.new_initial_state(), pair)[E]
+
+            logger.debug("  [aspro debug] E payoff vs each exploiter (payoff | bandit %%):")
+            for i in range(1, k + 1):
+                dist = bandits[i].distribution()
+                cells = []
+                ev = 0.0
+                for j in range(i):
+                    payoff = _payoff_E_vs_X(i, j)
+                    ev += dist[j] * payoff
+                    cells.append(f"X_{j}: {payoff:+.4f} {dist[j] * 100:5.1f}%")
+                logger.debug("    E_%s  %s  |  EV(vs pop)=%+.4f",
+                             i, "   ".join(cells), ev)
 
         run_start = time.perf_counter()
         for it in range(1, num_iterations + 1):

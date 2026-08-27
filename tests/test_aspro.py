@@ -49,6 +49,18 @@ def test_aspro_smoke_runs_and_logs_brv(exploited, bandit):
     assert os.path.exists(os.path.join(exp, "policy0_ckpt.pt"))
 
 
+def test_aspro_debug_runs_without_error():
+    # debug=True exercises _debug_aspro (exact payoffs vs each exploiter + bandit % + EV).
+    run_neupl_v2(
+        game_name="kuhn_poker", aspro=True, exploited_player="p1", bandit="hedge",
+        num_iterations=1, num_pols_sampled=2, total_episodes_per_policy=3, T=1,
+        expl_check_episode_interval=1, debug=True,
+    )
+    exp = _latest_experiment_dir()
+    assert os.path.exists(os.path.join(exp, "stats.jsonl"))
+    assert os.path.exists(os.path.join(exp, "brv.png"))
+
+
 def test_aspro_checkpoint_is_loadable():
     from psro import load_ppo_agents_from_neupl
     run_neupl_v2(
