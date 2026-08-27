@@ -22,3 +22,28 @@ def test_aspro_rejects_randall_loss():
 def test_aspro_rejects_gt_payoffs():
     with pytest.raises(ValueError):
         run_neupl_v2(game_name="kuhn_poker", aspro=True, gt_payoffs=True)
+
+
+import json, os, glob
+
+
+def _latest_experiment_dir():
+    dirs = glob.glob(os.path.join("results", "*", "neupl", "*", "*", "kuhn_poker", "*"))
+    return max(dirs, key=os.path.getmtime)
+
+
+@pytest.mark.parametrize("exploited,bandit", [("p1", "hedge"), ("p2", "rm")])
+def test_aspro_smoke_runs_and_logs_brv(exploited, bandit):
+    run_neupl_v2(
+        game_name="kuhn_poker", aspro=True, exploited_player=exploited, bandit=bandit,
+        num_iterations=2, num_pols_sampled=2, total_episodes_per_policy=5, T=2,
+        expl_check_episode_interval=1,  # force a BRV measurement every iteration
+    )
+    exp = _latest_experiment_dir()
+    with open(os.path.join(exp, "stats.jsonl")) as f:
+        records = [json.loads(line) for line in f if line.strip()]
+    assert records, "no stats recorded"
+    assert "brv_per_policy" in records[-1]
+    assert len(records[-1]["brv_per_policy"]) >= 1
+    assert os.path.exists(os.path.join(exp, "brv.png"))
+    assert os.path.exists(os.path.join(exp, "policy0_ckpt.pt"))

@@ -226,8 +226,13 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
         ]
         for player_id in range(2)
     ]
-    agents[0][0] = rl_policy.UniformRandomAgentPolicy(env, 0, num_actions=num_actions)
-    agents[1][0] = rl_policy.UniformRandomAgentPolicy(env, 1, num_actions=num_actions)
+    if aspro:
+        E = 0 if exploited_player == 'p1' else 1   # exploited (uniform anchor at index 0)
+        X = 1 - E                                  # exploiter (index 0 stays trainable BR)
+        agents[E][0] = rl_policy.UniformRandomAgentPolicy(env, E, num_actions=num_actions)
+    else:
+        agents[0][0] = rl_policy.UniformRandomAgentPolicy(env, 0, num_actions=num_actions)
+        agents[1][0] = rl_policy.UniformRandomAgentPolicy(env, 1, num_actions=num_actions)
     for player_agents in agents:
         for agent in player_agents:
             agent.unfreeze()
@@ -666,6 +671,112 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
 
     def _set_payoff_matrix_update_rate(update_rate):
         state.payoff_matrix_update_rate = update_rate
+
+    if aspro:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from bandits import make_bandit
+
+        reward_range = (game.min_utility(), game.max_utility())
+        # One persistent bandit per exploited policy index i, over arms {0..i-1}.
+        bandits = {i: make_bandit(bandit, num_arms=i, reward_range=reward_range, seed=i)
+                   for i in range(1, N)}
+
+        def _episode_agents(train_player, train_pol, opp_pol):
+            """Order agents by player id for oracle.sample_episode."""
+            pair = [None, None]
+            pair[train_player] = train_pol
+            pair[1 - train_player] = opp_pol
+            return pair
+
+        def _train_exploited(k):
+            """Train E's policies 1..k against their bandit mixture over X's {0..i-1}."""
+            for _ in range(num_pols_sampled):
+                i = min(random.randint(1, k + 1), N - 1)
+                training_pol = agents[E][i]
+                training_pol.unfreeze()
+                b = bandits[i]
+                for _ in range(total_episodes_per_policy):
+                    j = b.sample()
+                    opp = agents[X][j]
+                    opp.freeze()
+                    rewards = oracle.sample_episode(
+                        None, _episode_agents(E, training_pol, opp), is_evaluation=False)
+                    b.update(j, float(rewards[X]))   # reward = exploiter's payoff
+                    state.episodes_played += 1
+                    state.episodes_training += 1
+                _force_learn(training_pol, E)
+
+        def _train_exploiter(k):
+            """Train X's policies 0..k as a pure best response to E's same-index policy."""
+            for _ in range(num_pols_sampled):
+                i = min(random.randint(0, k + 1), N - 1)
+                training_pol = agents[X][i]
+                training_pol.unfreeze()
+                opp = agents[E][i]
+                opp.freeze()
+                for _ in range(total_episodes_per_policy):
+                    oracle.sample_episode(
+                        None, _episode_agents(X, training_pol, opp), is_evaluation=False)
+                    state.episodes_played += 1
+                    state.episodes_training += 1
+                _force_learn(training_pol, X)
+
+        def _plot_brv(records):
+            if not records:
+                return
+            xs = [r["episodes"] for r in records]
+            n_pol = max(len(r["brv_per_policy"]) for r in records)
+            fig, ax = plt.subplots(figsize=(8, 5))
+            cmap = plt.get_cmap("viridis")
+            for idx in range(n_pol):
+                ys = [(r["brv_per_policy"][idx] if idx < len(r["brv_per_policy"]) else np.nan)
+                      for r in records]
+                ax.plot(xs, ys, color=cmap(idx / max(n_pol - 1, 1)), lw=1, label=f"E_{idx}")
+            ax.set_xlabel("episodes"); ax.set_ylabel("BRV of exploited policy")
+            ax.set_title(f"APSRO BRV per exploited policy (E=p{E+1})")
+            ax.grid(True, alpha=0.3)
+            if n_pol <= 12:
+                ax.legend(fontsize=7, ncol=2)
+            fig.tight_layout()
+            fig.savefig(os.path.join(experiment_dir, "brv.png"), dpi=120)
+            plt.close(fig)
+
+        def _measure_brv(k):
+            if state.episodes_played - state.episodes_at_last_expl_check < expl_check_episode_interval:
+                return
+            for pid in range(2):
+                for i in range(k + 1):
+                    agents[pid][i].freeze()
+            brvs = [best_response_value(game, agents[E][i], fixed_player=E, br_player=X)
+                    for i in range(k + 1)]
+            state.episodes_at_last_expl_check = state.episodes_played
+            record = {
+                "episodes": state.episodes_played,
+                "episodes_training": state.episodes_training,
+                "walltime": time.perf_counter() - run_start,
+                "brv_per_policy": brvs,
+                "mean_brv": float(np.mean(brvs)),
+            }
+            state.stats.append(record)
+            with open(stats_path, "a") as f:
+                f.write(json.dumps(record) + "\n")
+            logger.info("  BRV per exploited policy (k=%s): %s",
+                        k, "  ".join(f"E_{i}={v:.4f}" for i, v in enumerate(brvs)))
+            _plot_brv(state.stats)
+
+        run_start = time.perf_counter()
+        for it in range(1, num_iterations + 1):
+            k = min(N - 1, max(1, int(np.ceil(it / T * (N - 1)))))
+            t = min(it - 1, lr_anneal_iters - 1) / max(lr_anneal_iters - 1, 1)
+            _set_lr(base_lr + (final_lr - base_lr) * t)
+            logger.info("  [aspro] iteration %s/%s  k=%s/%s", it, num_iterations, k, N - 1)
+            _train_exploited(k)
+            _train_exploiter(k)
+            _measure_brv(k)
+            _save_checkpoint()
+        return
 
     run_start = time.perf_counter()
     nash = None  # initialised on first iteration; carried over thereafter
@@ -1173,6 +1284,11 @@ if __name__ == '__main__':
     parser.add_argument('--debug', action='store_true', help='Enable debug mode for neupl_v2')
     parser.add_argument('--save_logs', action='store_true', help='Save NeuPL v2 logs under logs/neupl/')
     parser.add_argument('--gt_payoffs', action='store_true', help='Use ground-truth payoffs for Nash computation instead of the EMA payoff table')
+    parser.add_argument('--aspro', action='store_true', help='Asymmetric APSRO in neupl_v2')
+    parser.add_argument('--exploited_player', choices=['p1', 'p2'], default='p1',
+                        help='Which player APSRO optimizes/measures')
+    parser.add_argument('--bandit', choices=['hedge', 'rm'], default='hedge',
+                        help='Adversarial bandit for the exploited player')
     args = parser.parse_args()
     if args.use_randall_loss:
         assert args.neupl or args.neupl_v2, "Use randall loss only with neupl"
@@ -1180,7 +1296,8 @@ if __name__ == '__main__':
     game_name = args.game_name
     if args.neupl_v2:
         run_neupl_v2(game_name, use_randall_loss=args.use_randall_loss, T=args.T,
-                     debug=args.debug, gt_payoffs=args.gt_payoffs, save_logs=args.save_logs)
+                     debug=args.debug, gt_payoffs=args.gt_payoffs, save_logs=args.save_logs,
+                     aspro=args.aspro, exploited_player=args.exploited_player, bandit=args.bandit)
     elif args.neupl:
         run_neupl(game_name, use_randall_loss=args.use_randall_loss)
     else:
