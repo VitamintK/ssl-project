@@ -687,6 +687,7 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
         # (load_ppo_agents_from_neupl reads num_policies from it; default 100 would mismatch).
         aspro_config = OmegaConf.to_container(alg, resolve=True)
         aspro_config['num_policies'] = N
+        aspro_config['use_randall_loss'] = use_randall_loss  # so select_neupl_directory surfaces it
         aspro_config['aspro'] = True
         aspro_config['exploited_player'] = exploited_player
         aspro_config['bandit'] = bandit
@@ -1058,6 +1059,8 @@ def select_neupl_directory(
         extras = []
         if num_pol is not None:
             extras.append(f"num_policies={num_pol}")
+        if cfg.get("aspro"):
+            extras.append(f"aspro(exploited={cfg.get('exploited_player')},bandit={cfg.get('bandit')})")
         if final_expl is not None:
             extras.append(f"final_expl={final_expl:.4f}")
         extras_str = ("  " + "  ".join(extras)) if extras else ""

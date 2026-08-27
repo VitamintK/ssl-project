@@ -61,6 +61,9 @@ def test_aspro_checkpoint_is_loadable():
     with open(os.path.join(exp, "config.json")) as f:
         cfg = json.load(f)
     assert cfg["num_policies"] >= 2
+    # select_neupl_directory filters on this key; must be present so aspro dirs surface.
+    assert cfg["use_randall_loss"] is False
+    assert cfg["aspro"] is True
     # Round-trip through the standard NeuPL loader (hidden_size/embedding must match training).
     dir_name = os.path.basename(os.path.normpath(exp))
     a0, a1 = load_ppo_agents_from_neupl(
