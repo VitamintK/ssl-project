@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 import random
@@ -71,7 +73,7 @@ def run_neupl(game_name: str = 'kuhn_poker', use_randall_loss=False):
 
 
 
-def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, T: int = None, debug: bool = False, gt_payoffs: bool = False):
+def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, T: int = None, debug: bool = False, gt_payoffs: bool = False, save_logs: bool = False):
     """Custom NeuPL training loop.
 
     Replaces the iig_run_psro.RunPSRO-based loop with a hand-written one.
@@ -116,6 +118,22 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
 
     time_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
     random_str = uuid.uuid4().hex[:3]
+
+    logger = logging.getLogger(f"neupl_v2.{time_str}.{random_str}")
+    logger.setLevel(logging.DEBUG if debug else logging.INFO)
+    logger.propagate = False
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setFormatter(formatter)
+    logger.addHandler(stdout_handler)
+    if save_logs:
+        log_dir = os.path.join("logs", "neupl")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, f"{time_str}.log")
+        file_handler = logging.FileHandler(log_path)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        logger.info("Saving NeuPL logs to %s", log_path)
     experiment_dir = os.path.join(
         args.save_dir, args.group_name, 'neupl',
         alg.inner_rl_agent.algorithm_name,
@@ -363,7 +381,7 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
             training_pol = agents[player][pi]
             training_pol.unfreeze()
             opponent_nash = subgame_nashes[pi][opponent]
-            print(f'Training player {player} policy {pi} against opponent {opponent} with nash {opponent_nash}')
+            logger.info('Training player %s policy %s against opponent %s with nash %s', player, pi, opponent, opponent_nash)
             for _ in range(total_episodes_per_policy):
                 pj = int(np.random.choice(len(opponent_nash), p=opponent_nash))
                 opponent_pol = agents[opponent][pj]
@@ -384,9 +402,9 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
 
     def _print_payoffs(k):
         n = min(k + 1, 5)
-        print("  meta_games[0] (top-left corner):")
+        logger.info("  meta_games[0] (top-left corner):")
         for row in meta_games[0][:n]:
-            print("    " + "\t".join(_fmt(x) for x in row[:n]))
+            logger.info("    %s", "\t".join(_fmt(x) for x in row[:n]))
 
     def _compute_exploitability(k, nash):
         active_policies = [agents[0][:k + 1], agents[1][:k + 1]]
@@ -400,7 +418,7 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
     def _record_exploitability(k, nash):
         expl, expl_per_player = _compute_exploitability(k, nash)
         expl_str = "\t".join(_fmt(v) for v in expl_per_player)
-        print(f"  Exploitability: {_fmt(expl)}  per player: {expl_str}  (at {state.episodes_played} episodes)")
+        logger.info("  Exploitability: %s  per player: %s  (at %s episodes)", _fmt(expl), expl_str, state.episodes_played)
         state.episodes_at_last_expl_check = state.episodes_played
         state.last_exploitability = expl
 
@@ -415,7 +433,7 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
         state.stats.append(record)
         with open(stats_path, "a") as f:
             f.write(json.dumps(record) + "\n")
-        _plot_stats(state.stats, experiment_dir)
+        _plot_stats(state.stats, experiment_dir, logger=logger)
 
     def _print_exploitability(k, nash):
         if state.episodes_played - state.episodes_at_last_expl_check < expl_check_episode_interval:
@@ -438,7 +456,7 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
             return python_policy_to_pyspiel_policy(tabular)
 
         n = k + 1
-        print(f"  [debug] Ground-truth vs stored payoffs (k={k}):")
+        logger.debug("  Ground-truth vs stored payoffs (k=%s):", k)
 
         # Collect all values first.
         emp = np.array([[meta_games[0][i, j] for j in range(n)] for i in range(n)])
@@ -457,21 +475,21 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
         sep_w    = row_lbl_w + line_lbl_w + 3    # + " | "
         sep      = " " * sep_w + ("--".join("-" * col_w for _ in range(n)))
         hdr      = " " * sep_w + "  ".join(f"j={j}".center(col_w) for j in range(n))
-        print(hdr)
-        print(sep)
+        logger.debug(hdr)
+        logger.debug(sep)
         for i, row in enumerate(cells):
             for line_idx, line_label in enumerate(["emp", " gt", "dif"]):
                 row_lbl = f"  i={i} ".ljust(row_lbl_w) if line_idx == 1 else " " * row_lbl_w
                 prefix  = row_lbl + line_label + " | "
-                print(prefix + "  ".join(cell[line_idx].rjust(col_w) for cell in row))
-            print(sep)
+                logger.debug(prefix + "  ".join(cell[line_idx].rjust(col_w) for cell in row))
+            logger.debug(sep)
 
         max_err = float(np.nanmax(np.abs(diff)))
-        print(f"  [debug] max payoff err: {_fmt3(max_err)}")
+        logger.debug("  max payoff err: %s", _fmt3(max_err))
 
         if use_randall_loss:
             import torch
-            print(f"  [debug] Randall loss per cell (payoff - e_i·e_j) for i,j in 1..{k}:")
+            logger.debug("  Randall loss per cell (payoff - e_i·e_j) for i,j in 1..%s:", k)
             rl_cells = [[None] * k for _ in range(k)]
             for i in range(1, n):
                 for j in range(1, n):
@@ -482,14 +500,14 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
             rl_col_w = max(len(s) for row in rl_cells for s in row)
             rl_hdr = " " * sep_w + "  ".join(f"j={j+1}".center(rl_col_w) for j in range(k))
             rl_sep = " " * sep_w + "--".join("-" * rl_col_w for _ in range(k))
-            print(rl_hdr)
-            print(rl_sep)
+            logger.debug(rl_hdr)
+            logger.debug(rl_sep)
             for i, row in enumerate(rl_cells):
                 row_lbl = f"  i={i+1} ".ljust(row_lbl_w)
-                print(row_lbl + "    | " + "  ".join(s.rjust(rl_col_w) for s in row))
-            print(rl_sep)
+                logger.debug(row_lbl + "    | " + "  ".join(s.rjust(rl_col_w) for s in row))
+            logger.debug(rl_sep)
 
-        print(f"  [debug] Per-policy payoff vs aggregate opponent:")
+        logger.debug("  Per-policy payoff vs aggregate opponent:")
         for player in range(2):
             opponent = 1 - player
             for pi in range(1, min(N, k + 2)):
@@ -517,8 +535,9 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
                 )
                 br_payoff = current_payoff + expl_per_player[player]
 
-                print(f"    p{player} [{label}]  opp=[{dist_str}]"
-                      f"  payoff={_fmt(current_payoff)}  br_payoff={_fmt(br_payoff)} diff={_fmt(abs(current_payoff - br_payoff))}")
+                logger.debug("    p%s [%s]  opp=[%s]  payoff=%s  br_payoff=%s diff=%s",
+                             player, label, dist_str, _fmt(current_payoff),
+                             _fmt(br_payoff), _fmt(abs(current_payoff - br_payoff)))
 
     def _save_checkpoint():
         # All policies share one network per player; overwrite a single file each time.
@@ -573,24 +592,25 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
             marker = "Σ" if is_total else " "
             return (f"  │ {marker}{name:<{col_name}} │ {_fmt_dur(secs)} │ {pct:4.1f}% │ {bar} │")
 
-        print(f"\n{top}")
-        print(f"  │ {header:<{col_name + 1 + 9 + 1 + 6 + 1 + bar_width + 1}} │")
-        print(mid)
-        print(f"  │  {'Step':<{col_name}} │ {'  Time':>8} │ {'  Pct':>5} │ {'Bar':<{bar_width}} │")
-        print(mid)
+        logger.info("\n%s", top)
+        logger.info(f"  │ {header:<{col_name + 1 + 9 + 1 + 6 + 1 + bar_width + 1}} │")
+        logger.info(mid)
+        logger.info(f"  │  {'Step':<{col_name}} │ {'  Time':>8} │ {'  Pct':>5} │ {'Bar':<{bar_width}} │")
+        logger.info(mid)
         for name, dt in timings:
             pct = dt / total * 100 if total > 0 else 0.0
-            print(row(name, dt, pct))
-        print(mid)
-        print(row("TOTAL", total, 100.0, is_total=True))
-        print(bot)
+            logger.info(row(name, dt, pct))
+        logger.info(mid)
+        logger.info(row("TOTAL", total, 100.0, is_total=True))
+        logger.info(bot)
 
         # elapsed + ETA
         iters_done = i
         secs_per_iter = run_secs / iters_done
         eta = secs_per_iter * (num_iterations - iters_done)
-        print(f"  Elapsed: {_fmt_elapsed(run_secs)}  │  ETA: {_fmt_elapsed(eta)}  "
-              f"│  {iters_done}/{num_iterations} iters  │  {_fmt_dur(secs_per_iter).strip()}/iter avg")
+        logger.info("  Elapsed: %s  │  ETA: %s  │  %s/%s iters  │  %s/iter avg",
+                    _fmt_elapsed(run_secs), _fmt_elapsed(eta), iters_done,
+                    num_iterations, _fmt_dur(secs_per_iter).strip())
 
     # ── main loop ─────────────────────────────────────────────────────────────
 
@@ -628,7 +648,7 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
         lr = base_lr + (final_lr - base_lr) * t
         _set_lr(lr)
         payoff_matrix_update_rate = min(0.9998, 0.9995 + (i-1)/lr_anneal_iters * (0.9998 - 0.9995))
-        print(f'payoff_matrix_update_rate: {payoff_matrix_update_rate}')
+        logger.info('payoff_matrix_update_rate: %s', payoff_matrix_update_rate)
         _set_payoff_matrix_update_rate(payoff_matrix_update_rate)
         iter_start = time.perf_counter()
         timings = []
@@ -642,18 +662,18 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
         _timed("payoffs",               _update_payoffs, k)
         _timed("randall loss",          _update_randall_loss, k)
         nashes = _timed("nashes",       _compute_subgame_nashes, k)
-        print(f"  Training Player 0 ({total_episodes_per_policy * num_pols_sampled} episodes)...")
+        logger.info("  Training Player 0 (%s episodes)...", total_episodes_per_policy * num_pols_sampled)
         _timed("train player 0",        _train_player, 0, k, nashes)
 
         _timed("payoffs",               _update_payoffs, k)
         _timed("randall loss",          _update_randall_loss, k)
         nashes = _timed("nashes",       _compute_subgame_nashes, k)
-        print(f"  Training Player 1 ({total_episodes_per_policy * num_pols_sampled} episodes)...")
+        logger.info("  Training Player 1 (%s episodes)...", total_episodes_per_policy * num_pols_sampled)
         _timed("train player 1",        _train_player, 1, k, nashes)
 
         nash = nashes[k + 1]  # full (k+1)-policy Nash for display / exploitability
         nash_str = [" ".join(_fmt(v) for v in n) for n in nash]
-        print(f"  Nash P0: [{nash_str[0]}]  Nash P1: [{nash_str[1]}]")
+        logger.info("  Nash P0: [%s]  Nash P1: [%s]", nash_str[0], nash_str[1])
         _timed("print payoffs",      _print_payoffs, k)
         _timed("debug check",        _debug_check, k, nashes)
         _timed("exploitability",     _print_exploitability, k, nash)
@@ -663,6 +683,7 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
         config_data['num_policies'] = N
         config_data['use_randall_loss'] = use_randall_loss
         config_data['gt_payoffs'] = gt_payoffs
+        config_data['save_logs'] = save_logs
         config_data['randall_lr'] = RANDALL_LR
         config_data['randall_loss_epochs'] = RANDALL_LOSS_EPOCHS
         with open(os.path.join(experiment_dir, 'config.json'), 'w') as f:
@@ -673,7 +694,7 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
         _print_iter_summary(i, k, lr, timings, iter_secs, run_secs)
 
     # Final exploitability (unconditional — may repeat the last throttled check).
-    print("\n  [Final exploitability check]")
+    logger.info("\n  [Final exploitability check]")
     _record_exploitability(k, nash)
 
     # Persist final exploitability into config.json so the directory picker can show it.
@@ -687,11 +708,14 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
     with open(config_path, 'w') as f:
         json.dump(config_data, f)
 
-    _plot_stats(state.stats, experiment_dir)
+    _plot_stats(state.stats, experiment_dir, logger=logger)
+    for handler in logger.handlers[:]:
+        handler.close()
+        logger.removeHandler(handler)
     return experiment_dir
 
 
-def _plot_stats(stats, experiment_dir):
+def _plot_stats(stats, experiment_dir, logger=None):
     if not stats:
         return
     import matplotlib
@@ -725,7 +749,10 @@ def _plot_stats(stats, experiment_dir):
     out_path = os.path.join(experiment_dir, "exploitability.png")
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
-    print(f"  Saved exploitability plot → {out_path}")
+    if logger is not None:
+        logger.info("  Saved exploitability plot → %s", out_path)
+    else:
+        print(f"  Saved exploitability plot → {out_path}")
 
 
 def load_ppo_agents_from_psro(
@@ -1048,6 +1075,22 @@ def make_ppo_policies_from_neupl_agents(
 
     return policies
 
+def neupl_original_embeddings(agent):
+    """Normed embeddings of the original NeuPL policies (indices 1..num_policies-1).
+
+    These are the trained anchors the sampling Gaussian was fit to (index 0 = uniform
+    random is skipped). Returned as an (N-1, embedding_dim) numpy array, in the same
+    (post-norm) space as the sampled pool. Best-effort: returns None on any failure.
+    """
+    try:
+        device = next(agent.parameters()).device
+        embs = [agent.policy_representation_embedding(torch.tensor(i, device=device)).detach().cpu().numpy()
+                for i in range(1, agent.num_policies)]
+        return np.array(embs)
+    except Exception:
+        return None
+
+
 def make_neupl_policies(
     game_short_name: str,
     neupl_config: dict,
@@ -1096,6 +1139,7 @@ if __name__ == '__main__':
     parser.add_argument('--use_randall_loss', action='store_true', help='Use randall loss instead of standard loss')
     parser.add_argument('--game_name', type=str, default='kuhn_poker', help='Game to run')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode for neupl_v2')
+    parser.add_argument('--save_logs', action='store_true', help='Save NeuPL v2 logs under logs/neupl/')
     parser.add_argument('--gt_payoffs', action='store_true', help='Use ground-truth payoffs for Nash computation instead of the EMA payoff table')
     args = parser.parse_args()
     if args.use_randall_loss:
@@ -1103,7 +1147,8 @@ if __name__ == '__main__':
 
     game_name = args.game_name
     if args.neupl_v2:
-        run_neupl_v2(game_name, use_randall_loss=args.use_randall_loss, T=args.T, debug=args.debug, gt_payoffs=args.gt_payoffs)
+        run_neupl_v2(game_name, use_randall_loss=args.use_randall_loss, T=args.T,
+                     debug=args.debug, gt_payoffs=args.gt_payoffs, save_logs=args.save_logs)
     elif args.neupl:
         run_neupl(game_name, use_randall_loss=args.use_randall_loss)
     else:

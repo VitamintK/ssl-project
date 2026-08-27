@@ -464,11 +464,15 @@ class PayoffPredictor:
         self.ground_truth_payoffs = None
         self.pair_indices = None  # Will be set in compute_ground_truth_payoffs
 
-    def compute_ground_truth_payoffs(self):
+    def compute_ground_truth_payoffs(self, exact=False):
         """Compute ground truth payoffs for P1-P2 agent pairs.
 
         By default every (P1, P2) pair in the N x M grid is evaluated. If ``num_pairs``
         was set, a random sample of that many distinct pairs is evaluated instead.
+
+        Args:
+            exact: if True, use exact tree traversal (deterministic); otherwise Monte-Carlo
+                sampled payoffs (noisy).
         """
         n_p1, n_p2 = len(self.p1_policies), len(self.p2_policies)
         total_pairs = n_p1 * n_p2
@@ -485,7 +489,7 @@ class PayoffPredictor:
         payoffs = []
         self.pair_indices = []
         for p1_idx, p2_idx in tqdm(pairs, desc="Agent pairs"):
-            payoff = get_expected_payoffs(self.game, self.p1_policies[p1_idx], self.p2_policies[p2_idx])
+            payoff = get_expected_payoffs(self.game, self.p1_policies[p1_idx], self.p2_policies[p2_idx], exact=exact)
             payoffs.append(payoff)
             self.pair_indices.append((p1_idx, p2_idx))
 
@@ -1453,6 +1457,34 @@ def compute_nash_conv(game, p1_policy, p2_policy) -> float:
     return float(_exploitability.nash_conv(game, joint))
 
 
+def compute_best_response_value(game, committed_policy, committed_player_id=0) -> float:
+    """Best-response value an opponent achieves against the committed player's strategy.
+
+    In two-timescale descent-ascent only the slow (committed) player's strategy is a
+    meaningful equilibrium candidate; the fast player is just an approximate best
+    responder. So the quantity of interest is the exploitability of the committed player
+    alone -- how much a best-responding opponent scores against it -- not the NashConv of
+    the joint profile. This depends only on ``committed_policy`` (the fast player's actual
+    strategy is irrelevant, since the opponent is replaced by an exact best response).
+    """
+    from open_spiel.python import policy as policy_lib
+    from open_spiel.python.algorithms import best_response as _best_response
+
+    # Opponent states default to uniform in the profile and are ignored: the best
+    # responder overrides them. Only the committed player's states matter.
+    profile = policy_lib.TabularPolicy(game)
+    for state in profile.states:
+        if state.current_player() != committed_player_id:
+            continue
+        probs = committed_policy.action_probabilities(state)
+        row = profile.action_probability_array[profile.state_index(state)]
+        row[:] = 0.0
+        for action, p in probs.items():
+            row[action] = p
+    responder = _best_response.BestResponsePolicy(game, 1 - committed_player_id, profile)
+    return float(responder.value(game.new_initial_state()))
+
+
 @dataclass
 class SolveResult:
     e_p1: np.ndarray
@@ -1468,7 +1500,8 @@ class EmbeddingEquilibriumSolver:
     Player 0 (P1) maximizes V; player 1 (P2) minimizes V.
     """
 
-    def __init__(self, value_model, pool_p1, pool_p2, config, device="cpu"):
+    def __init__(self, game, value_model, pool_p1, pool_p2, decoder_p1, decoder_p2, config, device="cpu"):
+        self.game = game
         self.model = value_model.to(device).eval()
         for p in self.model.parameters():
             p.requires_grad_(False)
@@ -1476,12 +1509,41 @@ class EmbeddingEquilibriumSolver:
         self.config = config
         self.pool_p1 = np.asarray(pool_p1, dtype=np.float32)
         self.pool_p2 = np.asarray(pool_p2, dtype=np.float32)
+        self.decoder_p1 = decoder_p1
+        self.decoder_p2 = decoder_p2
         self.d1 = self.pool_p1.shape[1]
         self.d2 = self.pool_p2.shape[1]
         self.lo1 = torch.tensor(self.pool_p1.min(0), device=device)
         self.hi1 = torch.tensor(self.pool_p1.max(0), device=device)
         self.lo2 = torch.tensor(self.pool_p2.min(0), device=device)
         self.hi2 = torch.tensor(self.pool_p2.max(0), device=device)
+
+        # Mahalanobis trust region: keep the search inside the shell the pool occupies,
+        # so the value function is never evaluated far out of its training distribution.
+        if getattr(self.config, "trust_region", False):
+            q = self.config.trust_region_quantile
+            scale = getattr(self.config, "trust_region_scale", 1.0)
+            self.mu1, self.prec1, self.r1 = self._mahalanobis_params(self.pool_p1, q, scale, device)
+            self.mu2, self.prec2, self.r2 = self._mahalanobis_params(self.pool_p2, q, scale, device)
+
+    @staticmethod
+    def _mahalanobis_params(pool, quantile, scale, device):
+        """Return (mean, precision, radius) for the pool's Mahalanobis metric.
+
+        The base radius is the ``quantile`` of the pool points' own Mahalanobis distances
+        (the boundary of the region the training embeddings occupy); ``scale`` then
+        multiplies it, so scale > 1 lets the search extend beyond the observed pool.
+        """
+        mu = pool.mean(0)
+        cov = np.cov(pool.T)
+        ridge = 1e-4 * float(np.mean(np.diag(cov)))  # regularize against ill-conditioning
+        prec = np.linalg.inv(cov + ridge * np.eye(cov.shape[0]))
+        diff = pool - mu
+        dists = np.sqrt(np.maximum(np.einsum("ij,jk,ik->i", diff, prec, diff), 0.0))
+        radius = float(np.quantile(dists, quantile)) * scale
+        return (torch.tensor(mu, dtype=torch.float32, device=device),
+                torch.tensor(prec, dtype=torch.float32, device=device),
+                radius)
 
     def _value(self, e1, e2):
         return self.model(torch.cat([e1, e2]).unsqueeze(0)).squeeze(0)
@@ -1491,7 +1553,126 @@ class EmbeddingEquilibriumSolver:
             return torch.max(torch.min(e, hi), lo)
         return e
 
-    def solve(self, init_p1=None, init_p2=None) -> SolveResult:
+    def _mahalanobis_dist(self, e, mu, prec):
+        """Mahalanobis distance of embedding e to the pool mean, as a float."""
+        diff = (e - mu).detach()
+        return float(torch.sqrt(torch.clamp(diff @ (prec @ diff), min=0.0)))
+
+    def _project_trust_region(self, e, mu, prec, r):
+        """Radially rescale e (Mahalanobis metric) back onto the ball of radius r.
+
+        Returns (e, fired) where ``fired`` is True iff the point was outside the ball and
+        got projected.
+        """
+        diff = e - mu
+        d = torch.sqrt(torch.clamp(diff @ (prec @ diff), min=0.0))
+        fired = bool(float(d) > r > 0)
+        if fired:
+            e = mu + (r / d) * diff
+        return e, fired
+
+    def _constrain(self, e, which):
+        """Apply the box clamp and (if enabled) the Mahalanobis trust region to e.
+
+        Records whether the trust-region projection fired on ``self._tr_fired_p{which}``.
+        """
+        if which == 1:
+            e = self._clamp(e, self.lo1, self.hi1)
+            if getattr(self.config, "trust_region", False):
+                e, self._tr_fired_p1 = self._project_trust_region(e, self.mu1, self.prec1, self.r1)
+        else:
+            e = self._clamp(e, self.lo2, self.hi2)
+            if getattr(self.config, "trust_region", False):
+                e, self._tr_fired_p2 = self._project_trust_region(e, self.mu2, self.prec2, self.r2)
+        return e
+
+    def _online_update(self, e1, e2, opt, X_pre, y_pre, exact):
+        """One SGD step co-training the value model at the current (e1, e2).
+
+        The new pair's decoded true payoff is the target, mixed with a random anchor
+        minibatch of the pretraining pool pairs (size ``posttrain_anchor_batch``) so the
+        model doesn't forget the pool fit while chasing the trajectory. Mutates the model.
+        """
+        cfg = self.config
+        e1n, e2n = e1.detach().cpu().numpy(), e2.detach().cpu().numpy()
+        target = get_expected_payoffs(self.game, self.decoder_p1(e1n), self.decoder_p2(e2n), exact=exact)
+        X_rows, y_rows = [np.concatenate([e1n, e2n])], [target]
+        k = min(cfg.posttrain_anchor_batch, len(X_pre)) if X_pre is not None else 0
+        if k > 0:
+            idx = np.random.choice(len(X_pre), k, replace=False)
+            X_rows.append(np.asarray(X_pre)[idx])
+            y_rows.append(np.asarray(y_pre)[idx])
+        Xb = np.concatenate([np.atleast_2d(X_rows[0]), *X_rows[1:]], axis=0) if k > 0 else np.atleast_2d(X_rows[0])
+        yb = np.concatenate([np.atleast_1d(y_rows[0]), *y_rows[1:]], axis=0) if k > 0 else np.atleast_1d(y_rows[0])
+        Xt = torch.as_tensor(Xb, dtype=torch.float32, device=self.device)
+        yt = torch.as_tensor(yb, dtype=torch.float32, device=self.device)
+        opt.zero_grad()
+        loss = nn.MSELoss()(self.model(Xt), yt)
+        loss.backward()
+        opt.step()
+
+    def _ascend_p1(self, v, e1, lr):
+        """One P1 (player 0) gradient-ascent step on V (maximizer), constrained."""
+        (g1,) = torch.autograd.grad(v, e1)
+        with torch.no_grad():
+            e1 = self._constrain(e1 + lr * g1, which=1)
+        e1.requires_grad_(True)
+        return e1
+
+    def _descend_p2(self, v, e2, lr):
+        """One P2 (player 1) gradient-descent step on V (minimizer), constrained."""
+        (g2,) = torch.autograd.grad(v, e2)
+        with torch.no_grad():
+            e2 = self._constrain(e2 - lr * g2, which=2)
+        e2.requires_grad_(True)
+        return e2
+
+    def _value_pop(self, pop, other, which):
+        """V for a population of ``which``-player embeddings, holding the other fixed.
+
+        pop: (K, d_which) numpy; other: the fixed embedding tensor. Returns a (K,) np array.
+        """
+        pop_t = torch.as_tensor(pop, dtype=torch.float32, device=self.device)
+        other_t = other.detach().to(self.device).unsqueeze(0).expand(pop_t.shape[0], -1)
+        X = torch.cat([pop_t, other_t], dim=1) if which == 1 else torch.cat([other_t, pop_t], dim=1)
+        with torch.no_grad():
+            return self.model(X).detach().cpu().numpy()
+
+    def _cem_step(self, e1, e2, which):
+        """One cross-entropy-method step for the given player (which=1 P1 max, 2 P2 min).
+
+        Samples ``cem_population`` candidates around the current embedding, keeps the
+        best-scoring ``cem_elite_frac`` (top V for P1, bottom V for P2), and moves toward
+        their mean by ``cem_step_size``. Gradient-free; constrained like a gradient step.
+        """
+        cfg = self.config
+        base, other = (e1, e2) if which == 1 else (e2, e1)
+        base_np = base.detach().cpu().numpy().astype(np.float32)
+        d = base_np.shape[0]
+        pop = np.vstack([base_np[None],
+                         base_np[None] + cfg.cem_noise * np.random.randn(cfg.cem_population, d).astype(np.float32)])
+        vals = self._value_pop(pop, other, which)
+        m = max(1, int(round(cfg.cem_elite_frac * pop.shape[0])))
+        order = np.argsort(vals)
+        elite_idx = order[-m:] if which == 1 else order[:m]  # P1 maximizes, P2 minimizes
+        elite_mean = pop[elite_idx].mean(0)
+        new_np = base_np + cfg.cem_step_size * (elite_mean - base_np)
+        new = torch.as_tensor(new_np, dtype=torch.float32, device=self.device)
+        with torch.no_grad():
+            new = self._constrain(new, which=which)
+        new.requires_grad_(True)
+        return new
+
+    def _player_step(self, e1, e2, which, lr):
+        """One update for the ``which`` player (1 = P1 max, 2 = P2 min), dispatched by
+        ``config.optimizer`` (gradient descent-ascent or CEM). ``lr`` is used by gradient
+        only. Returns the updated embedding for that player."""
+        if self.config.optimizer == "cem":
+            return self._cem_step(e1, e2, which)
+        v = self._value(e1, e2)
+        return self._ascend_p1(v, e1, lr) if which == 1 else self._descend_p2(v, e2, lr)
+
+    def solve(self, init_p1=None, init_p2=None, X_pre=None, y_pre=None, exact=False) -> SolveResult:
         cfg = self.config
         rng = np.random
         if init_p1 is None:
@@ -1500,49 +1681,229 @@ class EmbeddingEquilibriumSolver:
             init_p2 = self.pool_p2[rng.randint(len(self.pool_p2))]
         e1 = torch.tensor(np.asarray(init_p1, np.float32), device=self.device, requires_grad=True)
         e2 = torch.tensor(np.asarray(init_p2, np.float32), device=self.device, requires_grad=True)
+
+        # Online co-training: unfreeze the value model and open an optimizer for the solve.
+        online = cfg.posttrain and X_pre is not None
+        opt = None
+        if online:
+            for p in self.model.parameters():
+                p.requires_grad_(True)
+            self.model.train()
+            opt = torch.optim.Adam(self.model.parameters(), lr=cfg.posttrain_lr)
+
+        # Which player is the slow / committed optimizer (outer loop). The other player is
+        # the fast best-responder (inner loop). committed_id 0 = P1, 1 = P2. The exploited
+        # (committed/outer) player steps at lr_exploited; the exploiter (fast/inner) at
+        # lr_exploiter -- regardless of which is P1/P2.
+        committed_id = 0 if cfg.optimizing_player == "p1" else 1
+        lr_out, lr_in = cfg.lr_exploited, cfg.lr_exploiter
+
+        self._tr_fired_p1 = self._tr_fired_p2 = False  # updated by _constrain
         visited = []
         stats = []  # generic per-step log; currently records v at each inner step
-        for outer_step in range(cfg.outer_steps):
-            # inner loop: P2 minimizes V (fast)
+        for outer_step in tqdm(range(cfg.outer_steps)):
+            # inner loop: the non-committed player best-responds (fast)
             for inner_step in range(cfg.inner_steps):
                 v = self._value(e1, e2)
-                stats.append({'outer_step': outer_step, 'inner_step': inner_step,
-                              'v': float(v.detach())})
-                (g2,) = torch.autograd.grad(v, e2)
-                with torch.no_grad():
-                    e2 = self._clamp(e2 - cfg.lr_p2 * g2, self.lo2, self.hi2)
-                e2.requires_grad_(True)
-            # outer step: P1 maximizes V (slow)
-            v = self._value(e1, e2)
-            (g1,) = torch.autograd.grad(v, e1)
-            with torch.no_grad():
-                e1 = self._clamp(e1 + cfg.lr_p1 * g1, self.lo1, self.hi1)
-            e1.requires_grad_(True)
+                stat = {'outer_step': outer_step, 'inner_step': inner_step,
+                              'v': float(v.detach())}
+                # Distance from each current embedding to the nearest pool embedding (the
+                # sampled policies the value function was trained on) -- how far the solve
+                # has wandered outside the training support. Cheap, so always logged.
+                stat['dist_p1_to_pool'] = float(
+                    np.linalg.norm(self.pool_p1 - e1.detach().cpu().numpy(), axis=1).min())
+                stat['dist_p2_to_pool'] = float(
+                    np.linalg.norm(self.pool_p2 - e2.detach().cpu().numpy(), axis=1).min())
+                # Trust-region diagnostics: Mahalanobis distance vs the shell radius, and
+                # whether the projection fired producing the current point. Only meaningful
+                # (and cheap) when the trust region is enabled.
+                if getattr(cfg, "trust_region", False):
+                    stat['mahalanobis_p1'] = self._mahalanobis_dist(e1, self.mu1, self.prec1)
+                    stat['mahalanobis_p2'] = self._mahalanobis_dist(e2, self.mu2, self.prec2)
+                    stat['tr_radius_p1'] = float(self.r1)
+                    stat['tr_radius_p2'] = float(self.r2)
+                    stat['tr_fired_p1'] = bool(self._tr_fired_p1)
+                    stat['tr_fired_p2'] = bool(self._tr_fired_p2)
+                if cfg.log_real_values:
+                    policy_1, policy_2 = self.decoder_p1(e1.detach().cpu().numpy()), self.decoder_p2(e2.detach().cpu().numpy())
+                    real_v = get_expected_payoffs(self.game, policy_1, policy_2, exact=True)
+                    if inner_step == 0:
+                        # The committed (outer) player's embedding is constant across the
+                        # inner loop, so track its exploitability (best-response value)
+                        # alone once per outer step, not the NashConv of the joint profile.
+                        committed_policy = policy_1 if committed_id == 0 else policy_2
+                        real_exploitability = compute_best_response_value(
+                            self.game, committed_policy, committed_player_id=committed_id)
+                    stat['real_v'] = float(real_v)
+                    stat['real_exploitability'] = float(real_exploitability)
+                stats.append(stat)
+                # inner update: the fast (non-committed / exploiter) player
+                if committed_id == 0:
+                    e2 = self._player_step(e1, e2, which=2, lr=lr_in)   # inner = P2
+                else:
+                    e1 = self._player_step(e1, e2, which=1, lr=lr_in)   # inner = P1
+                if online:  # co-train V on the freshly stepped (e1, e2)
+                    self._online_update(e1, e2, opt, X_pre, y_pre, exact)
+            # outer step: the committed (slow / exploited) player
+            if committed_id == 0:
+                e1 = self._player_step(e1, e2, which=1, lr=lr_out)      # outer = P1
+            else:
+                e2 = self._player_step(e1, e2, which=2, lr=lr_out)      # outer = P2
+            if online:  # co-train V on the freshly stepped (e1, e2)
+                self._online_update(e1, e2, opt, X_pre, y_pre, exact)
             visited.append((e1.detach().cpu().numpy().copy(),
                             e2.detach().cpu().numpy().copy()))
+        if online:
+            self.model.eval()
+        if getattr(cfg, "trust_region", False) and stats:
+            f1 = np.mean([s['tr_fired_p1'] for s in stats])
+            f2 = np.mean([s['tr_fired_p2'] for s in stats])
+            m1 = np.mean([s['mahalanobis_p1'] for s in stats])
+            m2 = np.mean([s['mahalanobis_p2'] for s in stats])
+            print(f"  trust region: projection fired P1={f1:.0%} P2={f2:.0%} | "
+                  f"mean Mahalanobis P1={m1:.2f}/{self.r1:.2f} P2={m2:.2f}/{self.r2:.2f}")
         with torch.no_grad():
             final_v = float(self._value(e1, e2))
         return SolveResult(e1.detach().cpu().numpy(), e2.detach().cpu().numpy(),
                            final_v, visited, stats)
 
-    def solve_best_of_restarts(self, score_fn) -> SolveResult:
-        """Run num_restarts solves; return the result minimizing score_fn(result) (lower=better).
+    def solve_best_of_restarts(self, score_fn, X_pre=None, y_pre=None, exact=False) -> SolveResult:
+        """Run num_restarts solves; return the one minimizing score_fn (lower=better).
 
-        The per-solve stats logs for every restart of the most recent call are kept on
-        ``self.last_restart_stats`` (one element per restart) for inspection/plotting.
+        When online posttraining is enabled (``config.posttrain`` and ``X_pre`` given), each
+        solve co-trains the value model as it goes (see ``solve`` / ``_online_update``), and
+        the model is reset to its pretrained state before each restart so restarts are
+        independent attempts.
+
+        The stats/results for every restart of the most recent call are kept on
+        ``self.last_restart_stats`` / ``self.last_restart_results`` for plotting.
         """
+        do_posttrain = self.config.posttrain and X_pre is not None
+        pretrained_state = (copy.deepcopy(self.model.state_dict()) if do_posttrain else None)
+
         best, best_score = None, float("inf")
         self.last_restart_stats = []
+        self.last_restart_results = []
         for _ in range(self.config.num_restarts):
-            res = self.solve()
+            if pretrained_state is not None:  # reset so each restart is independent
+                self.model.load_state_dict(pretrained_state)
+            res = self.solve(X_pre=X_pre, y_pre=y_pre, exact=exact)
             self.last_restart_stats.append(res.stats)
+            self.last_restart_results.append(res)
             s = score_fn(res)
             if s < best_score:
                 best, best_score = res, s
         return best
 
 
-def plot_solve_value_curves(restart_stats, save_path, title=None):
+def _render_solve_curves_on_ax(ax, stats, title=None, committed_player_id=0):
+    """Draw one restart's value / exploitability / pool-distance curves onto ``ax``.
+
+    Uses up to two twin y-axes: exploitability (BRV) and distance-to-pool, when the solver
+    logged them.
+    """
+    vs = [rec['v'] for rec in stats]
+    handles = ax.plot(range(len(vs)), vs, lw=1, color="tab:blue", label="predicted v")
+    # Overlay the true decoded value where the solver logged it.
+    if any('real_v' in rec for rec in stats):
+        real_vs = [rec.get('real_v') for rec in stats]
+        handles += ax.plot(range(len(real_vs)), real_vs, lw=1,
+                           color="tab:orange", label="real v")
+    # Overlay the committed player's exploitability (the opponent's best-response
+    # value against it) on a twin y-axis.
+    has_expl = any('real_exploitability' in rec for rec in stats)
+    if has_expl:
+        committed_name = f"P{committed_player_id + 1}"
+        real_expl = [rec.get('real_exploitability') for rec in stats]
+        ax2 = ax.twinx()
+        handles += ax2.plot(range(len(real_expl)), real_expl, lw=1, ls="--",
+                            color="tab:green",
+                            label=f"{committed_name} exploitability (BRV)")
+        ax2.set_ylabel(f"{committed_name} exploitability (BRV)")
+    # Overlay each player's distance to the nearest pool embedding on a second twin
+    # y-axis (offset outward when the exploitability axis is also present).
+    if any('dist_p1_to_pool' in rec for rec in stats):
+        ax3 = ax.twinx()
+        if has_expl:
+            ax3.spines['right'].set_position(('outward', 55))
+        d1 = [rec.get('dist_p1_to_pool') for rec in stats]
+        d2 = [rec.get('dist_p2_to_pool') for rec in stats]
+        handles += ax3.plot(range(len(d1)), d1, lw=1, ls=":", color="tab:red",
+                            label="P1 dist to pool")
+        handles += ax3.plot(range(len(d2)), d2, lw=1, ls=":", color="tab:purple",
+                            label="P2 dist to pool")
+        ax3.set_ylabel("dist to nearest pool embedding")
+    ax.legend(handles=handles, labels=[h.get_label() for h in handles], fontsize=8)
+    if title:
+        ax.set_title(title)
+    ax.set_xlabel("inner step")
+    ax.set_ylabel("v")
+    ax.grid(True, alpha=0.3)
+
+
+def _render_values_on_ax(ax, stats, title=None, committed_player_id=0):
+    """Values panel: predicted/real v plus committed-player exploitability."""
+    vs = [rec['v'] for rec in stats]
+    handles = ax.plot(range(len(vs)), vs, lw=1, color="tab:blue", label="predicted v")
+    if any('real_v' in rec for rec in stats):
+        real_vs = [rec.get('real_v') for rec in stats]
+        handles += ax.plot(range(len(real_vs)), real_vs, lw=1, color="tab:orange", label="real v")
+    if any('real_exploitability' in rec for rec in stats):
+        committed_name = f"P{committed_player_id + 1}"
+        real_expl = [rec.get('real_exploitability') for rec in stats]
+        ax2 = ax.twinx()
+        handles += ax2.plot(range(len(real_expl)), real_expl, lw=1, ls="--",
+                            color="tab:green",
+                            label=f"{committed_name} exploitability (BRV)")
+        ax2.set_ylabel(f"{committed_name} exploitability (BRV)")
+    ax.legend(handles=handles, labels=[h.get_label() for h in handles], fontsize=7)
+    if title:
+        ax.set_title(title)
+    ax.set_xlabel("inner step")
+    ax.set_ylabel("v")
+    ax.grid(True, alpha=0.3)
+
+
+def _render_distances_on_ax(ax, stats, title=None):
+    """Distances panel: Euclidean dist-to-pool (left axis) + Mahalanobis dist (right twin).
+
+    The Mahalanobis axis also draws each player's trust-region shell radius as a faint
+    horizontal reference, so you can see when the search sits at the boundary.
+    """
+    handles = []
+    if any('dist_p1_to_pool' in rec for rec in stats):
+        d1 = [rec.get('dist_p1_to_pool') for rec in stats]
+        d2 = [rec.get('dist_p2_to_pool') for rec in stats]
+        handles += ax.plot(range(len(d1)), d1, lw=1, ls=":", color="tab:red",
+                           label="P1 Euclid dist")
+        handles += ax.plot(range(len(d2)), d2, lw=1, ls=":", color="tab:purple",
+                           label="P2 Euclid dist")
+    ax.set_ylabel("Euclidean dist to pool")
+    if any('mahalanobis_p1' in rec for rec in stats):
+        ax2 = ax.twinx()
+        m1 = [rec['mahalanobis_p1'] for rec in stats]
+        m2 = [rec['mahalanobis_p2'] for rec in stats]
+        handles += ax2.plot(range(len(m1)), m1, lw=1, ls="-.", color="tab:brown",
+                            label="P1 Mahalanobis")
+        handles += ax2.plot(range(len(m2)), m2, lw=1, ls="-.", color="tab:pink",
+                            label="P2 Mahalanobis")
+        r1, r2 = stats[0].get('tr_radius_p1'), stats[0].get('tr_radius_p2')
+        if r1 is not None:
+            ax2.axhline(r1, color="tab:brown", lw=0.8, ls=":", alpha=0.5)
+        if r2 is not None and (r1 is None or abs(r2 - r1) > 1e-9):
+            ax2.axhline(r2, color="tab:pink", lw=0.8, ls=":", alpha=0.5)
+        ax2.set_ylabel("Mahalanobis dist (·· = shell)")
+    if handles:
+        ax.legend(handles=handles, labels=[h.get_label() for h in handles], fontsize=7)
+    if title:
+        ax.set_title(title)
+    ax.set_xlabel("inner step")
+    ax.grid(True, alpha=0.3)
+
+
+def plot_solve_value_curves(
+    restart_stats, save_path, title=None, committed_player_id=0,
+):
     """Plot the value trajectory of each solve run, one subplot per restart.
 
     Args:
@@ -1569,19 +1930,456 @@ def plot_solve_value_curves(restart_stats, save_path, title=None):
     nrows = math.ceil(n / ncols)
     fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 3.5 * nrows), squeeze=False)
     for k, stats in enumerate(runs):
-        ax = axes[k // ncols][k % ncols]
-        vs = [rec['v'] for rec in stats]
-        ax.plot(range(len(vs)), vs, lw=1)
-        ax.set_title(f"restart {k}")
-        ax.set_xlabel("inner step")
-        ax.set_ylabel("v")
-        ax.grid(True, alpha=0.3)
+        _render_solve_curves_on_ax(
+            axes[k // ncols][k % ncols], stats, title=f"restart {k}",
+            committed_player_id=committed_player_id,
+        )
     # hide any unused axes in the grid
     for k in range(n, nrows * ncols):
         axes[k // ncols][k % ncols].axis("off")
     if title:
         fig.suptitle(title)
     fig.tight_layout()
+
+    _Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=120)
+    plt.close(fig)
+    return save_path
+
+
+def _trajectory_plane(path, second_axis="path", seed=0):
+    """Orthonormal basis (a, e1, e2) of a 2D plane that contains the path's endpoints.
+
+    The plane is anchored at the start (``a = path[0]``) and always contains the
+    start->final segment, so both endpoints lie exactly on it (start at plane-coord
+    (0, 0), final at (||final - start||, 0)). e1 is the unit start->final direction; e2 is
+    orthonormal to e1 and chosen by ``second_axis``:
+      - "path": the principal component of the path's residual after removing its e1
+        component -- i.e. the max-variance direction orthogonal to e1, so the least-squares
+        best-fit plane subject to containing the endpoints.
+      - "random": a random direction orthogonalized against e1 (seeded by ``seed``).
+
+    Degenerate case (start ~= final, no segment to pin): falls back to the unconstrained
+    top-2 principal components of the path, anchored at its mean.
+    """
+    path = np.asarray(path, dtype=np.float64)
+    a, b = path[0], path[-1]
+    D = a.shape[0]
+    eps = 1e-9
+    u = b - a
+    ulen = float(np.linalg.norm(u))
+    if ulen < eps:  # degenerate: endpoints coincide, nothing to pin
+        C = path - path.mean(0)
+        _, _, Vt = np.linalg.svd(C, full_matrices=False)
+        e1 = Vt[0] if Vt.shape[0] > 0 else np.eye(D)[0]
+        e2 = Vt[1] if Vt.shape[0] > 1 else np.eye(D)[min(1, D - 1)]
+        return path.mean(0), e1 / np.linalg.norm(e1), e2 / np.linalg.norm(e2)
+
+    e1 = u / ulen
+    rel = path - a
+    resid = rel - np.outer(rel @ e1, e1)  # path component orthogonal to e1
+    if second_axis == "random" or np.linalg.norm(resid) < eps:
+        w = np.random.RandomState(seed).randn(D)
+    else:  # principal direction of the residual (best-fit second axis)
+        _, _, Vt = np.linalg.svd(resid, full_matrices=False)
+        w = Vt[0]
+    w = w - (w @ e1) * e1  # re-orthogonalize against e1
+    if np.linalg.norm(w) < eps:
+        w = np.random.RandomState(seed + 1).randn(D)
+        w = w - (w @ e1) * e1
+    e2 = w / np.linalg.norm(w)
+    return a, e1, e2
+
+
+def _project_to_plane(path, a, e1, e2):
+    """Plane coordinates (alpha, beta) of each path point in the (a, e1, e2) frame."""
+    rel = np.asarray(path, dtype=np.float64) - a
+    return rel @ e1, rel @ e2
+
+
+def _plane_grid(alpha, beta, grid_size, margin_frac):
+    """1D coordinate arrays spanning the projected path's extent (+ margin), incl. origin."""
+    def _axis(vals, include_zero):
+        lo, hi = float(vals.min()), float(vals.max())
+        if include_zero:
+            lo, hi = min(lo, 0.0), max(hi, 0.0)
+        pad = margin_frac * (hi - lo) if hi > lo else (abs(hi) + 1.0) * margin_frac + 1e-3
+        return np.linspace(lo - pad, hi + pad, grid_size)
+    return _axis(alpha, True), _axis(beta, True)
+
+
+def _landscape_grid(game, decoder_p1, path, plane, grid_size, margin_frac,
+                    committed_player_id, desc):
+    """Sweep P1 exploitability over the plane; return (aa, bb, Z, alpha, beta)."""
+    a, e1, e2 = plane
+    alpha, beta = _project_to_plane(path, a, e1, e2)
+    aa, bb = _plane_grid(alpha, beta, grid_size, margin_frac)
+    Z = np.empty((grid_size, grid_size), dtype=np.float64)
+    for iy, bv in enumerate(tqdm(bb, desc=desc)):
+        for ix, av in enumerate(aa):
+            emb = a + av * e1 + bv * e2
+            Z[iy, ix] = compute_best_response_value(
+                game, decoder_p1(emb.astype(np.float32)), committed_player_id=committed_player_id)
+    return aa, bb, Z, alpha, beta
+
+
+def _draw_landscape(
+    ax, fig, aa, bb, Z, alpha, beta, vmin=None, vmax=None, path_label="P1",
+):
+    """Draw a precomputed exploitability grid + projected path onto ``ax``."""
+    mesh = ax.pcolormesh(aa, bb, Z, shading="auto", cmap="viridis", vmin=vmin, vmax=vmax)
+    fig.colorbar(mesh, ax=ax, label="BRV")
+    ax.plot(alpha, beta, color="white", lw=1.2, alpha=0.9,
+            label=f"{path_label} path")
+    # A marker every 100 outer-loop iterations (path index == outer step).
+    tick = np.arange(0, len(alpha), 100)
+    ax.scatter(alpha[tick], beta[tick], color="white", marker="o", s=40, alpha=0.5,
+               zorder=4, label="every 100 iters")
+    ax.scatter([alpha[0]], [beta[0]], color="white", marker="o", s=50,
+               edgecolor="black", zorder=5, label="start")
+    ax.scatter([alpha[-1]], [beta[-1]], color="red", marker="*", s=140,
+               edgecolor="black", zorder=5, label="final")
+    ax.set_xlabel("along start→final")
+    ax.set_ylabel("orthogonal path axis")
+
+
+def _render_exploitability_landscape_on_ax(
+    ax, fig, game, decoder_p1, path, plane, grid_size, margin_frac, committed_player_id, desc,
+    vmin=None, vmax=None,
+):
+    """Compute + draw one restart's exploitability landscape (heatmap + path) onto ``ax``.
+
+    ``plane`` is the (a, e1, e2) orthonormal frame from ``_trajectory_plane``. The heatmap
+    is swept over that plane -- ``emb = a + alpha*e1 + beta*e2`` -- so the start and final
+    endpoints (which lie exactly in the plane) are evaluated as their true embeddings, not
+    projections. Intermediate path points are projected onto the plane.
+    """
+    aa, bb, Z, alpha, beta = _landscape_grid(
+        game, decoder_p1, path, plane, grid_size, margin_frac, committed_player_id, desc)
+    _draw_landscape(ax, fig, aa, bb, Z, alpha, beta, vmin=vmin, vmax=vmax)
+
+
+def _render_path_on_ax(ax, path, plane, prefix, color="tab:blue"):
+    """Plot a trajectory (no heatmap) in the (a, e1, e2) plane frame, with endpoints."""
+    a, e1, e2 = plane
+    alpha, beta = _project_to_plane(path, a, e1, e2)
+    ax.plot(alpha, beta, color=color, lw=1.2, alpha=0.9, label=f"{prefix} path")
+    # A marker every 100 outer-loop iterations (path index == outer step).
+    tick = np.arange(0, len(alpha), 100)
+    ax.scatter(alpha[tick], beta[tick], color=color, marker="o", s=40, alpha=0.5,
+               zorder=4, label="every 100 iters")
+    ax.scatter([alpha[0]], [beta[0]], color="white", marker="o", s=50,
+               edgecolor="black", zorder=5, label="start")
+    ax.scatter([alpha[-1]], [beta[-1]], color="red", marker="*", s=140,
+               edgecolor="black", zorder=5, label="final")
+    ax.set_xlabel(f"{prefix}: along start→final")
+    ax.set_ylabel(f"{prefix}: orthogonal path axis")
+    ax.grid(True, alpha=0.3)
+
+
+def plot_exploitability_landscape(
+    game, decoder_p1, results, save_path,
+    dim_selection="path", grid_size=25, margin_frac=0.5,
+    committed_player_id=0, seed=0, title=None,
+):
+    """Plot P1's exploitability landscape and P2's path, one row per restart.
+
+    Self-contained. For each solve restart, the left panel builds a 2D plane through P1's
+    embedding space that contains the trajectory's start and final points (so both are
+    faithful, not projections), sweeps a grid over it, decodes each grid point to a P1
+    policy, and plots its exploitability (best-response value) with the P1 path overlaid.
+    See ``_trajectory_plane`` for how the plane is chosen. The right panel shows the P2
+    trajectory in the analogous P2-space plane -- P2's embedding is a different space with
+    no exploitability defined against it, so there is no heatmap.
+
+    Args:
+        game: OpenSpiel game.
+        decoder_p1: maps a P1 embedding (1D np.ndarray) to a Policy.
+        results: a ``SolveResult`` or a list of them (e.g. ``solver.last_restart_results``).
+            Each uses ``.e_p1`` (final embedding) and ``.visited`` (per-outer-step
+            ``(e_p1, e_p2)`` path).
+        save_path: PNG output path.
+        dim_selection: how the plane's second axis is chosen (the first is always the
+            start->final direction): "path" = best-fit (principal residual) direction,
+            "random" = a random orthogonal direction seeded by ``seed``.
+        grid_size: resolution per axis (grid_size**2 BR evals per restart).
+        margin_frac: fraction of the projected path's span to pad the grid on each side.
+        committed_player_id: which player P1 is (its exploitability is what we plot).
+        seed: RNG seed for "random" second-axis selection.
+        title: optional overall figure title.
+
+    Returns:
+        The save_path written, or None if there was nothing to plot.
+    """
+    from pathlib import Path as _Path
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if not isinstance(results, (list, tuple)):
+        results = [results]
+    runs = [r for r in results if r is not None and getattr(r, "visited", None)]
+    if not runs:
+        return None
+    if np.asarray(runs[0].e_p1).shape[0] < 2:
+        return None
+    show_p2 = np.asarray(runs[0].e_p2).shape[0] >= 2  # need a 2D P2 space to project into
+
+    n = len(runs)
+    ncols = 2 if show_p2 else 1  # left = P1 landscape, right = P2 path
+    fig, axes = plt.subplots(n, ncols, figsize=(6.5 * ncols, 5.5 * n), squeeze=False)
+    for k, result in enumerate(runs):
+        path1 = np.array([np.asarray(e1, dtype=np.float64) for (e1, _e2) in result.visited])
+        plane1 = _trajectory_plane(path1, second_axis=dim_selection, seed=seed)
+        ax1 = axes[k][0]
+        _render_exploitability_landscape_on_ax(
+            ax1, fig, game, decoder_p1, path1, plane1, grid_size, margin_frac,
+            committed_player_id, desc=f"Landscape restart {k}")
+        ax1.legend(fontsize=7, loc="best")
+        ax1.set_title(f"restart {k}: P1 exploitability (2nd axis: {dim_selection})")
+
+        if show_p2:
+            path2 = np.array([np.asarray(e2, dtype=np.float64) for (_e1, e2) in result.visited])
+            plane2 = _trajectory_plane(path2, second_axis=dim_selection, seed=seed)
+            ax2 = axes[k][1]
+            _render_path_on_ax(ax2, path2, plane2, prefix="P2", color="tab:purple")
+            ax2.legend(fontsize=7, loc="best")
+            ax2.set_title(f"restart {k}: P2 path (2nd axis: {dim_selection})")
+
+    fig.suptitle(title or f"P1 exploitability landscape + P2 path ({dim_selection})")
+    fig.tight_layout(rect=[0, 0, 1, 0.985])
+
+    _Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=120)
+    plt.close(fig)
+    return save_path
+
+
+def _pool_grid(game, decoder_p1, pool, grid_size, margin_frac, committed_player_id=0,
+               mode="pca", seed=0, originals=None):
+    """Sweep P1 exploitability over a 2D pool slice; return a dict of grid data or None.
+
+    ``mode="pca"`` slices through the pool's two highest-variance directions;
+    ``mode="random"`` slices through two random coordinate dimensions. The plane is anchored
+    at the pool mean, the grid spans all sampled points, off-slice dims held at the mean.
+    If ``originals`` (the pre-sampling policy embeddings) is given, they are projected onto
+    the same axes and returned for overlay.
+    """
+    pool = np.asarray(pool, dtype=np.float64)
+    if pool.ndim != 2 or pool.shape[0] < 2 or pool.shape[1] < 2:
+        return None
+    D = pool.shape[1]
+    mu = pool.mean(0)
+    C = pool - mu
+    if mode == "random":
+        d0, d1 = sorted(np.random.RandomState(seed).choice(D, size=2, replace=False).tolist())
+        e1, e2 = np.zeros(D), np.zeros(D)
+        e1[d0], e2[d1] = 1.0, 1.0
+        xlabel, ylabel = f"dim {d0}", f"dim {d1}"
+    else:  # pca
+        _, S, Vt = np.linalg.svd(C, full_matrices=False)
+        e1, e2 = Vt[0], Vt[1]  # top-2 principal (highest-variance) directions
+        total = float(np.sum(S ** 2)) or 1.0
+        xlabel = f"PC1 ({S[0] ** 2 / total:.0%} var)"
+        ylabel = f"PC2 ({S[1] ** 2 / total:.0%} var)"
+    a, b = C @ e1, C @ e2  # pool points projected onto the two axes
+
+    a_orig = b_orig = None
+    if originals is not None:
+        originals = np.asarray(originals, dtype=np.float64)
+        if originals.ndim == 2 and originals.shape[1] == D and len(originals):
+            Co = originals - mu
+            a_orig, b_orig = Co @ e1, Co @ e2
+
+    def _axis(vals):
+        lo, hi = float(vals.min()), float(vals.max())
+        pad = margin_frac * (hi - lo) if hi > lo else 1.0
+        return np.linspace(lo - pad, hi + pad, grid_size)
+
+    # Span both the sampled pool and (if present) the original policy projections.
+    xs = a if a_orig is None else np.concatenate([a, a_orig])
+    ys = b if b_orig is None else np.concatenate([b, b_orig])
+    aa, bb = _axis(xs), _axis(ys)
+    Z = np.empty((grid_size, grid_size), dtype=np.float64)
+    for iy, bv in enumerate(tqdm(bb, desc=f"Pool landscape ({mode})")):
+        for ix, av in enumerate(aa):
+            emb = mu + av * e1 + bv * e2
+            Z[iy, ix] = compute_best_response_value(
+                game, decoder_p1(emb.astype(np.float32)), committed_player_id=committed_player_id)
+    return {"aa": aa, "bb": bb, "Z": Z, "a": a, "b": b,
+            "a_orig": a_orig, "b_orig": b_orig, "xlabel": xlabel, "ylabel": ylabel,
+            "mu": mu, "e1": e1, "e2": e2}  # projection frame, to overlay other points
+
+
+def _draw_pool(ax, fig, grid, vmin=None, vmax=None):
+    """Draw a precomputed pool-slice grid (heatmap + scattered pool points) onto ``ax``."""
+    mesh = ax.pcolormesh(grid["aa"], grid["bb"], grid["Z"], shading="auto", cmap="viridis",
+                         vmin=vmin, vmax=vmax)
+    fig.colorbar(mesh, ax=ax, label="BRV")
+    ax.scatter(grid["a"], grid["b"], s=6, c="white", edgecolor="none", alpha=0.5, label="sampled pool")
+    if grid.get("a_orig") is not None:
+        ax.scatter(grid["a_orig"], grid["b_orig"], s=28, c="tab:red", marker="x",
+                   linewidths=1.0, zorder=6, label="original policies")
+    ax.set_xlabel(grid["xlabel"])
+    ax.set_ylabel(grid["ylabel"])
+    ax.legend(fontsize=7, loc="best")
+
+
+def _render_pool_landscape_on_ax(ax, fig, game, decoder_p1, pool, grid_size, margin_frac,
+                                 committed_player_id=0, mode="pca", seed=0, vmin=None, vmax=None):
+    """Compute + draw a global pool-slice exploitability landscape. Returns True if drawn."""
+    grid = _pool_grid(game, decoder_p1, pool, grid_size, margin_frac, committed_player_id,
+                      mode=mode, seed=seed)
+    if grid is None:
+        return False
+    _draw_pool(ax, fig, grid, vmin=vmin, vmax=vmax)
+    return True
+
+
+def plot_task_f_combined(
+    restart_stats, restart_results, game, committed_decoder, save_path,
+    dim_selection="path", grid_size=25, margin_frac=0.5,
+    committed_player_id=0, seed=0, title=None, committed_pool=None, landscape_vmax=None,
+    committed_originals=None,
+):
+    """One figure, one row per restart: [curves (stacked) | committed landscape | other path].
+
+    The exploitability heatmaps are drawn for the *committed* (outer/optimizing) player --
+    ``committed_player_id`` (0 = P1, 1 = P2), decoded by ``committed_decoder`` -- and the
+    plain-path column shows the other (fast) player's trajectory. Column 0 of each row is
+    split into two stacked panels: values + exploitability on top, Euclidean + Mahalanobis
+    distances on the bottom. The other-player column is dropped when its embeddings are <2D.
+
+    All exploitability heatmaps (the two pool overviews and every per-restart landscape)
+    share one color scale: ``vmin`` is the global minimum BRV across them, and ``vmax`` is
+    ``landscape_vmax`` when given (capping the top) else the global maximum.
+
+    Args:
+        restart_stats: per-restart stats lists (``solver.last_restart_stats``).
+        restart_results: matching per-restart ``SolveResult``s (``solver.last_restart_results``).
+        game, committed_decoder: decode the committed player's embedding for the heatmap.
+        save_path: PNG output path.
+        dim_selection, grid_size, margin_frac, seed: forwarded to the landscape rendering.
+        committed_player_id: 0 (P1) or 1 (P2) -- the player whose exploitability is plotted.
+        title: optional overall figure title.
+        committed_pool: the committed player's embedding pool; when given, a global overview
+            panel is drawn at the top (its exploitability over the pool's top-2 variance
+            axes and over 2 random dims, with all sampled points scattered on it).
+        landscape_vmax: if set, an upper cap on the shared heatmap color scale -- the top
+            is min(global max BRV, landscape_vmax), so it is used only when the data exceeds it.
+        committed_originals: the committed player's pre-sampling policy embeddings; when
+            given, overlaid on the two overview panels (distinct from the sampled pool).
+
+    Returns:
+        The save_path written, or None if there was nothing to plot.
+    """
+    from pathlib import Path as _Path
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    pairs = [(s, r) for s, r in zip(restart_stats, restart_results)
+             if s and r is not None and getattr(r, "visited", None)]
+    if not pairs:
+        return None
+    cid, oid = committed_player_id, 1 - committed_player_id  # committed / other player ids
+
+    def _player_path(result, pid):
+        return np.array([np.asarray(pair[pid], dtype=np.float64) for pair in result.visited])
+
+    other_emb0 = pairs[0][1].e_p1 if oid == 0 else pairs[0][1].e_p2
+    show_other = np.asarray(other_emb0).shape[0] >= 2
+    ncols = 3 if show_other else 2
+
+    n = len(pairs)
+    show_overview = (committed_pool is not None and np.asarray(committed_pool).ndim == 2
+                     and np.asarray(committed_pool).shape[1] >= 2)
+
+    # --- pass 1: compute every heatmap grid so all can share one color scale ---
+    overview_grids = []
+    if show_overview:
+        for mode in ("pca", "random"):
+            g = _pool_grid(game, committed_decoder, committed_pool, grid_size, margin_frac,
+                           cid, mode=mode, seed=seed, originals=committed_originals)
+            overview_grids.append(g)
+        if all(g is None for g in overview_grids):
+            show_overview, overview_grids = False, []
+    restart_grids = []  # (aa, bb, Z, alpha, beta) for the committed player's landscape
+    for k, (stats, result) in enumerate(pairs):
+        cpath = _player_path(result, cid)
+        plane = _trajectory_plane(cpath, second_axis=dim_selection, seed=seed)
+        aa, bb, Z, alpha, beta = _landscape_grid(
+            game, committed_decoder, cpath, plane, grid_size, margin_frac,
+            cid, desc=f"Landscape restart {k}")
+        restart_grids.append((aa, bb, Z, alpha, beta))
+
+    all_Z = [g["Z"] for g in overview_grids if g is not None] + [rg[2] for rg in restart_grids]
+    vmin = float(min(Z.min() for Z in all_Z)) if all_Z else None
+    vmax = float(max(Z.max() for Z in all_Z)) if all_Z else None
+    if landscape_vmax is not None:  # treat as an upper cap, not a fixed top
+        vmax = landscape_vmax if vmax is None else min(vmax, landscape_vmax)
+
+    cname, oname = f"P{cid + 1}", f"P{oid + 1}"  # display names
+
+    # --- pass 2: draw everything with the shared (vmin, vmax) ---
+    nrows = n + (1 if show_overview else 0)
+    fig = plt.figure(figsize=(6.5 * ncols, 6.0 * nrows), constrained_layout=True)
+    outer = fig.add_gridspec(nrows, ncols)
+
+    if show_overview:  # two exploitability slices of the pool space
+        cmap = plt.get_cmap("tab10")
+        top = outer[0, :].subgridspec(1, 2, wspace=0.25)
+        for j, (g, ttl) in enumerate(zip(
+                overview_grids,
+                (f"{cname} exploitability over top-2 pool variance axes",
+                 f"{cname} exploitability over 2 random dims"))):
+            ax_ov = fig.add_subplot(top[j])
+            if g is not None:
+                _draw_pool(ax_ov, fig, g, vmin=vmin, vmax=vmax)
+                # Overlay each restart's committed path, projected onto these axes.
+                for k, (_stats, result) in enumerate(pairs):
+                    rel = _player_path(result, cid) - g["mu"]
+                    pa, pb = rel @ g["e1"], rel @ g["e2"]
+                    col = cmap(k % 10)
+                    ax_ov.plot(pa, pb, color=col, lw=1.6, alpha=0.9, label=f"restart {k}")
+                    ax_ov.scatter([pa[-1]], [pb[-1]], color=col, marker="*", s=60,
+                                  edgecolor="black", zorder=7)
+                ax_ov.legend(fontsize=6, loc="best")
+                ax_ov.set_title(ttl)
+
+    row0 = 1 if show_overview else 0
+    for k, (stats, result) in enumerate(pairs):
+        r = row0 + k
+        # Column 0: values (top) and distances (bottom) stacked.
+        inner = outer[r, 0].subgridspec(2, 1)
+        _render_values_on_ax(
+            fig.add_subplot(inner[0]), stats, title=f"restart {k}: values",
+            committed_player_id=cid,
+        )
+        _render_distances_on_ax(fig.add_subplot(inner[1]), stats,
+                               title=f"restart {k}: distances")
+
+        # Column 1: committed player's exploitability landscape (precomputed grid).
+        ax_c = fig.add_subplot(outer[r, 1])
+        aa, bb, Z, alpha, beta = restart_grids[k]
+        _draw_landscape(
+            ax_c, fig, aa, bb, Z, alpha, beta, vmin=vmin, vmax=vmax,
+            path_label=cname,
+        )
+        ax_c.legend(fontsize=7, loc="best")
+        ax_c.set_title(f"restart {k}: {cname} exploitability")
+
+        # Column 2: other (fast) player's path.
+        if show_other:
+            ax_o = fig.add_subplot(outer[r, 2])
+            opath = _player_path(result, oid)
+            oplane = _trajectory_plane(opath, second_axis=dim_selection, seed=seed)
+            _render_path_on_ax(ax_o, opath, oplane, prefix=oname, color="tab:purple")
+            ax_o.legend(fontsize=7, loc="best")
+            ax_o.set_title(f"restart {k}: {oname} path")
+
+    if title:
+        fig.suptitle(title)
 
     _Path(save_path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, dpi=120)

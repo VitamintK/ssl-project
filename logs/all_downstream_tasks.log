@@ -1,41 +1,16 @@
-Running 6 jobs sequentially (no multiprocessing)
-Running Task B: kuhn_poker neupl(True)(g) p0vp1 randloss=True N=1000 Task B
-Model type: random_forest
-Number of P1 policies: 1000
-Number of P2 policies: Evaluating on validation set...
-Running control comparison with shuffled embeddings...
-Evaluating control (shuffled embeddings) on validation set...
-Control comparison results:
-  Original avg empirical payoff: 2.1242
-  Control avg empirical payoff:  2.2920
-  Original avg exact exploitability: 3.1720
-  Control avg exact exploitability:  3.1720
-Completed: leduc_poker ppo random 0 reconstruction-autoencoder Task E
-Running Task E: leduc_poker ppo random 0 reconstruction-autoencoder Task E
-Model type: None
-Number of policies: 500
-Player ID: 0
-Embedding dimension: 64
-Evaluating on validation set...
-Running control comparison with shuffled embeddings...
-Evaluating control (shuffled embeddings) on validation set...
-Control comparison results:
-  Original avg empirical payoff: 2.0899
-  Control avg empirical payoff:  1.9921
-  Original avg exact exploitability: 3.0880
-  Control avg exact exploitability:  3.0880
-Completed: leduc_poker ppo random 0 reconstruction-autoencoder Task E
-Running Task E: leduc_poker ppo random 0 reconstruction-autoencoder Task E
-Model type: None
-Number of policies: 500
-Player ID: 0
-Embedding dimension: 64
-Evaluating on validation set...
-Running control comparison with shuffled embeddings...
-Evaluating control (shuffled embeddings) on validation set...
-Control comparison results:
-  Original avg empirical payoff: 2.2590
-  Control avg empirical payoff:  1.8028
-  Original avg exact exploitability: 3.0245
-  Control avg exact exploitability:  3.0245
-Completed: leduc_poker ppo random 0 reconstruction-autoencoder Task E
+Running 3 jobs sequentially (no multiprocessing)
+Running Task F: kuhn_poker neupl(True)(g) p0vp1 randloss=False N=1000 Task F
+Loaded cached value function from results/value_fn_cache/kuhn_poker_neupl_True_g_p0vp1_randloss_False_N_1000_Task_F_value_fn.pt
+Task F NeuPL BRV against each original player_id=0 (p1) policy (N=21): policy 1=0.340043, policy 2=0.166365, policy 3=0.333333, policy 4=0.322361, policy 5=0.333495, policy 6=0.127862, policy 7=0.387240, policy 8=0.364802, policy 9=0.355383, policy 10=0.114330, policy 11=0.114669, policy 12=0.098716, policy 13=0.288614, policy 14=0.127812, policy 15=0.087433, policy 16=0.141146, policy 17=0.237951, policy 18=0.114620, policy 19=0.093939, policy 20=0.118302, policy 21=0.457214
+Saved solve stats to figures/task_f/kuhn_poker_neupl_True_g_p0vp1_randloss_False_N_1000_Task_F_solve_stats.json
+Saved Task F figure to figures/task_f/kuhn_poker_neupl_True_g_p0vp1_randloss_False_N_1000_Task_F_task_f.png
+Task F NashConv: 0.513727  baseline: 0.455765
+Completed: kuhn_poker neupl(True)(g) p0vp1 randloss=False N=1000 Task F
+Running Task F: kuhn_poker psro reconstruction-autoencoder Task F
+Loaded cached value function from results/value_fn_cache/kuhn_poker_psro_reconstruction-autoencoder_Task_F_value_fn.pt
+Saved solve stats to figures/task_f/kuhn_poker_psro_reconstruction-autoencoder_Task_F_solve_stats.json
+Saved Task F figure to figures/task_f/kuhn_poker_psro_reconstruction-autoencoder_Task_F_task_f.png
+Task F NashConv: 0.911147  baseline: 0.910694
+Completed: kuhn_poker psro reconstruction-autoencoder Task F
+Running Task F: kuhn_poker psro identity Task F
+Loaded cached value function from results/value_fn_cache/kuhn_poker_psro_identity_Task_F_value_fn.pt

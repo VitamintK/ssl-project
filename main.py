@@ -13,7 +13,7 @@ from datetime import datetime
 
 from open_spiel.python import policy as policy_lib
 from iig_rl_benchmark.algorithms.ppo.ppo import PPOAgent
-from psro import load_ppo_agents_from_psro, make_neupl_policies, select_neupl_directory, neupl_decoder
+from psro import load_ppo_agents_from_psro, make_neupl_policies, select_neupl_directory, neupl_decoder, neupl_original_embeddings
 from utils import PPOAgentPolicy, get_device_string, make_diverse_random_kuhn_poker_layer_init
 from functional_autoencoder import (
     TrainingConfig,
@@ -1004,6 +1004,7 @@ def _run_experiment(spec: dict) -> tuple:
 
     # --- load policies and embeddings ---
     model_dir = None
+    original_embeddings = p2_original_embeddings = None  # NeuPL anchor embeddings (for plot overlay)
     if source == 'neupl':
         model_dir = spec['run_dir']
         policies_and_embeddings = make_neupl_policies(
@@ -1019,6 +1020,8 @@ def _run_experiment(spec: dict) -> tuple:
         embeddings = [p_e[0].detach().cpu().numpy() for p_e in policies_and_embeddings[player_id]]
         # NeuPL decoder: condition the shared conditioned agent on the embedding (no weight reconstruction).
         decoder = lambda e, a=policies[0]._ppo_agent, pid=player_id: neupl_decoder(game, a, e, pid)
+        # Original (pre-sampling) NeuPL policy embeddings, for overlay on the overview plots.
+        original_embeddings = neupl_original_embeddings(policies[0]._ppo_agent)
     elif source == 'psro':
         model_dir = f"results/test/psro/ppo/hs256/{game_short_name}"
         ppo_agents = load_ppo_agents_from_psro(
@@ -1052,6 +1055,7 @@ def _run_experiment(spec: dict) -> tuple:
             p2_policies = [p_e[1] for p_e in policies_and_embeddings[1]]
             p2_embeddings = [p_e[0].detach().cpu().numpy() for p_e in policies_and_embeddings[1]]
             p2_decoder = lambda e, a=p2_policies[0]._ppo_agent: neupl_decoder(game, a, e, 1)
+            p2_original_embeddings = neupl_original_embeddings(p2_policies[0]._ppo_agent)
         elif source == 'psro':
             ppo_agents_p2 = load_ppo_agents_from_psro(
                 game_short_name=game_short_name, hidden_size=256, player_id=1, shuffle=True,
@@ -1128,19 +1132,42 @@ def _run_experiment(spec: dict) -> tuple:
 
         ov = spec.get('task_f_overrides', {})
         model_cfg = ModelConfig(model_type=spec['predictor_type'],
-                                num_epochs=ov.get('model_num_epochs', 5000))
+                                num_epochs=ov.get('model_num_epochs', 5000),
+                                early_stopping_patience=3,
+                                )
         config = TaskFConfig(
-            model_config=model_cfg,
-            num_pairs=ov.get('num_pairs', None),
-            outer_steps=ov.get('outer_steps', 200),
-            inner_steps=ov.get('inner_steps', 5),
-            num_restarts=ov.get('num_restarts', 4),
+            value_function_model_config=model_cfg,
+            value_function_num_pairs=ov.get('num_pairs', 10000),
+            optimizing_player=ov.get('optimizing_player', 'p1'),
+            optimizer=ov.get('optimizer', 'gradient'),
+            cem_population=ov.get('cem_population', 64),
+            cem_elite_frac=ov.get('cem_elite_frac', 0.125),
+            cem_noise=ov.get('cem_noise', 0.1),
+            cem_step_size=ov.get('cem_step_size', 1.0),
+            outer_steps=ov.get('outer_steps', 1400),
+            inner_steps=ov.get('inner_steps', 4), # 9 
+            lr_exploited=ov.get('lr_exploited', 1e-2),
+            lr_exploiter=ov.get('lr_exploiter', 2.1e-2),
+            num_restarts=ov.get('num_restarts', 2),
             bound_embeddings=ov.get('bound_embeddings', True),
-            posttrain=ov.get('posttrain', False),
-            nashconv_baseline_samples=ov.get('nashconv_baseline_samples', 8))
+            posttrain=ov.get('posttrain', True),
+            posttrain_lr=ov.get('posttrain_lr', 1e-4),
+            posttrain_anchor_batch=ov.get('posttrain_anchor_batch', 64),
+            nashconv_baseline_samples=ov.get('nashconv_baseline_samples', 8),
+            log_real_values=ov.get('log_real_values', False),
+            value_function_cache_dir=ov.get('value_function_cache_dir', None),
+            plot_landscape=ov.get('plot_landscape', False),
+            landscape_dim_selection=ov.get('landscape_dim_selection', 'path'),
+            landscape_grid_size=ov.get('landscape_grid_size', 25),
+            trust_region=ov.get('trust_region', False),
+            trust_region_quantile=ov.get('trust_region_quantile', 1.0),
+            trust_region_scale=ov.get('trust_region_scale', 5.0),
+            exact_payoff_targets=ov.get('exact_payoff_targets', False))
         result = run_task_f(game=game, p1_policies=policies, p1_embeddings=embeddings,
                             p2_policies=p2_policies, p2_embeddings=p2_embeddings,
                             p1_decoder=p1_decoder, p2_decoder=p2_decoder,
+                            p1_original_embeddings=original_embeddings,
+                            p2_original_embeddings=p2_original_embeddings,
                             config=config, experiment_info=experiment_info, device=device)
     else:
         raise ValueError(f"Unknown task: {task}")
@@ -1189,7 +1216,7 @@ if __name__ == "__main__":
     RUN_TASK_F = True
 
     RUN_NEUPL = True
-    RUN_PSRO = False
+    RUN_PSRO = True
     RUN_RANDOM = False
 
     RUN_IDENTITY = False
@@ -1201,7 +1228,7 @@ if __name__ == "__main__":
     if RUN_RECONSTRUCTION_AUTOENCODER:
         encoder_types.append('reconstruction-autoencoder')
 
-    NUM_SEEDS = 3
+    NUM_SEEDS = 1
 
     MAX_WORKERS = 3  # tune to available CPUs
 
@@ -1247,7 +1274,7 @@ if __name__ == "__main__":
     specs = []
     for seed_num in range(NUM_SEEDS):
         if RUN_NEUPL:
-            for use_randall_loss in [True, False]:
+            for use_randall_loss in [False]: # [True, False]:
                 run_dir = neupl_run_dirs[(use_randall_loss, seed_num)]
                 neupl_config = {'use_randall_loss': use_randall_loss,
                                 'hidden_size': 256, 'policy_embedding_size': 64}
@@ -1288,6 +1315,13 @@ if __name__ == "__main__":
                                   'NEUPL_SAMPLING_MODE': NEUPL_SAMPLING_MODE,
                                   'INTERPOLATE_PRENORM': INTERPOLATE_PRENORM,
                                   'task': 'f', 'predictor_type': 'mlp',
+                                  'task_f_overrides': {'log_real_values': True,
+                                                       'value_function_cache_dir': 'results/value_fn_cache',
+                                                       'plot_landscape': True,
+                                                       'trust_region': True,
+                                                       'exact_payoff_targets': True,
+                                                       'optimizing_player': "p1",
+                                                       },
                                   'experiment_info': ExperimentInfo(
                                       f'{game_short_name} neupl({INTERPOLATE_PRENORM})({NEUPL_SAMPLING_MODE[:1]}) p0vp1 randloss={use_randall_loss} N={N} Task F',
                                       embedding_type='neupl', task_id='F')})
@@ -1322,6 +1356,11 @@ if __name__ == "__main__":
                 for emb_type in ['reconstruction-autoencoder', 'identity']:
                     specs.append({'source': 'psro', 'game_name': game_name, 'player_id': 0,
                                   'embedding_type': emb_type, 'task': 'f', 'predictor_type': 'mlp',
+                                  'task_f_overrides': {'log_real_values': True,
+                                                       'value_function_cache_dir': 'results/value_fn_cache',
+                                                       'plot_landscape': True,
+                                                       'trust_region': True,
+                                                       'exact_payoff_targets': True},
                                   'experiment_info': ExperimentInfo(
                                       f'{game_short_name} psro {emb_type} Task F',
                                       embedding_type=emb_type, task_id='F')})
@@ -1351,6 +1390,11 @@ if __name__ == "__main__":
                                       embedding_type=emb_type, task_id='B')})
                 if RUN_TASK_F:
                     specs.append({**base, 'task': 'f', 'predictor_type': 'mlp',
+                                  'task_f_overrides': {'log_real_values': True,
+                                                       'value_function_cache_dir': 'results/value_fn_cache',
+                                                       'plot_landscape': True,
+                                                       'trust_region': True,
+                                                       'exact_payoff_targets': True},
                                   'experiment_info': ExperimentInfo(
                                       f'{game_short_name} ppo random 0 {emb_type} Task F',
                                       embedding_type=emb_type, task_id='F')})

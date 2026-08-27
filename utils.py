@@ -7,6 +7,7 @@ import pyspiel
 from open_spiel.python import policy
 from open_spiel.python import rl_agent
 from open_spiel.python.algorithms.psro_v2.abstract_meta_trainer import sample_episode
+from open_spiel.python.algorithms.expected_game_score import policy_value
 
 def get_device_string():
     if torch.cuda.is_available():
@@ -104,7 +105,17 @@ def get_expected_payoffs_agent(game: pyspiel.Game, p0_ppo_agent: ppo.PPOAgent, p
         payoffs.append(payoff)
     return np.mean(payoffs)
 
-def get_expected_payoffs(game: pyspiel.Game, p0_policy: policy.Policy, p1_policy: policy.Policy) -> float:
+def get_expected_payoffs(game: pyspiel.Game, p0_policy: policy.Policy, p1_policy: policy.Policy, exact=False) -> float:
+    if exact:
+        return _get_expected_payoffs_exact(game, p0_policy, p1_policy)
+    else:
+        return _get_expected_payoffs_sampled(game, p0_policy, p1_policy)
+
+
+def _get_expected_payoffs_exact(game: pyspiel.Game, p0_policy: policy.Policy, p1_policy: policy.Policy) -> float:
+    return policy_value(game.new_initial_state(), [p0_policy, p1_policy])[0]
+
+def _get_expected_payoffs_sampled(game: pyspiel.Game, p0_policy: policy.Policy, p1_policy: policy.Policy) -> float:
     policies = [p0_policy, p1_policy]
     payoffs = []
     for i in range(150):

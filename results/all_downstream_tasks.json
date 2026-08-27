@@ -1,199 +1,132 @@
 {
   "run": [
     {
-      "experiment_label": "leduc_poker ppo random 0 reconstruction-autoencoder Task E",
+      "experiment_label": "kuhn_poker neupl(True)(g) p0vp1 randloss=False N=1000 Task F",
       "results": [
         {
+          "nashconv": 0.513727382404688,
+          "nashconv_baseline": 0.45576523012995,
+          "value_at_star": -0.08028864115476608,
+          "sampled_payoff_at_star": 0.02666666731238365,
           "val_metrics": {
-            "avg_empirical_payoff": 2.1241750717163086,
-            "avg_exact_exploitability": 3.1719980239868164,
-            "num_policies": 100
+            "mse": 0.0020156303446471897,
+            "mae": 0.03170194640183914,
+            "baseline_mse": 0.003781575165425899
           },
           "config": {
-            "model_config": {
-              "model_type": null,
-              "hidden_dims": null,
+            "value_function_model_config": {
+              "model_type": "mlp",
+              "hidden_dims": [
+                128,
+                64,
+                32
+              ],
               "dropout": 0.0,
               "learning_rate": 0.0001,
               "num_epochs": 5000,
               "batch_size": 16,
-              "early_stopping_patience": 50,
-              "optimizer_type": "adamw"
+              "early_stopping_patience": 3,
+              "optimizer_type": "adam"
             },
-            "player_id": 0,
-            "validation_split": 0.2,
-            "max_batch_size": 30,
-            "num_trajectories_per_policy_per_epoch": 13,
-            "epochs": 32,
-            "compare_to_control": true
+            "value_function_validation_split": 0.2,
+            "value_function_num_pairs": 10000,
+            "exact_payoff_targets": true,
+            "optimizing_player": "p1",
+            "optimizer": "gradient",
+            "outer_steps": 1400,
+            "inner_steps": 4,
+            "lr_exploited": 0.01,
+            "lr_exploiter": 0.021,
+            "cem_population": 64,
+            "cem_elite_frac": 0.125,
+            "cem_noise": 0.1,
+            "cem_step_size": 1.0,
+            "num_restarts": 2,
+            "bound_embeddings": true,
+            "trust_region": true,
+            "trust_region_quantile": 1.0,
+            "trust_region_scale": 5.0,
+            "posttrain": true,
+            "posttrain_lr": 0.0001,
+            "posttrain_anchor_batch": 64,
+            "nashconv_baseline_samples": 8,
+            "log_real_values": true,
+            "value_function_cache_dir": "results/value_fn_cache",
+            "plot_landscape": true,
+            "landscape_dim_selection": "path",
+            "landscape_grid_size": 25
           },
-          "omega_conf": {
-            "seed": 0,
-            "max_steps": 10000000,
-            "game": "classical_phantom_ttt",
-            "save_dir": "results",
-            "group_name": "test",
-            "experiment_dir": "",
-            "compute_exploitability": false,
-            "compute_exploitability_every": 500000,
-            "run_in_safe_mode": true,
-            "job_id": -1,
-            "algorithm": {
-              "algorithm_name": "ppo",
-              "anneal_lr": true,
-              "clip_coef": 0.035,
-              "clip_vloss": true,
-              "ent_coef": 0.012,
-              "gae": true,
-              "gae_lambda": 0.95,
-              "gamma": 0.99,
-              "max_grad_norm": 6,
-              "norm_adv": true,
-              "learning_rate": 5.5e-05,
-              "final_learning_rate": 5.5e-05,
-              "num_envs": 1,
-              "num_minibatches": 1,
-              "num_steps": 256,
-              "target_kl": null,
-              "update_epochs": 8,
-              "vf_coef": 0.0625,
-              "eval_every": 3
-            }
-          },
-          "control_metrics": {
-            "avg_empirical_payoff": 2.2920002937316895,
-            "avg_exact_exploitability": 3.1719980239868164,
-            "num_policies": 100
-          }
-        },
-        {
-          "val_metrics": {
-            "avg_empirical_payoff": 2.0899250507354736,
-            "avg_exact_exploitability": 3.088027238845825,
-            "num_policies": 100
-          },
-          "config": {
-            "model_config": {
-              "model_type": null,
-              "hidden_dims": null,
-              "dropout": 0.0,
-              "learning_rate": 0.0001,
-              "num_epochs": 5000,
-              "batch_size": 16,
-              "early_stopping_patience": 50,
-              "optimizer_type": "adamw"
-            },
-            "player_id": 0,
-            "validation_split": 0.2,
-            "max_batch_size": 30,
-            "num_trajectories_per_policy_per_epoch": 13,
-            "epochs": 32,
-            "compare_to_control": true
-          },
-          "omega_conf": {
-            "seed": 0,
-            "max_steps": 10000000,
-            "game": "classical_phantom_ttt",
-            "save_dir": "results",
-            "group_name": "test",
-            "experiment_dir": "",
-            "compute_exploitability": false,
-            "compute_exploitability_every": 500000,
-            "run_in_safe_mode": true,
-            "job_id": -1,
-            "algorithm": {
-              "algorithm_name": "ppo",
-              "anneal_lr": true,
-              "clip_coef": 0.035,
-              "clip_vloss": true,
-              "ent_coef": 0.012,
-              "gae": true,
-              "gae_lambda": 0.95,
-              "gamma": 0.99,
-              "max_grad_norm": 6,
-              "norm_adv": true,
-              "learning_rate": 5.5e-05,
-              "final_learning_rate": 5.5e-05,
-              "num_envs": 1,
-              "num_minibatches": 1,
-              "num_steps": 256,
-              "target_kl": null,
-              "update_epochs": 8,
-              "vf_coef": 0.0625,
-              "eval_every": 3
-            }
-          },
-          "control_metrics": {
-            "avg_empirical_payoff": 1.9920802116394043,
-            "avg_exact_exploitability": 3.088027238845825,
-            "num_policies": 100
-          }
-        },
-        {
-          "val_metrics": {
-            "avg_empirical_payoff": 2.258975028991699,
-            "avg_exact_exploitability": 3.0244905948638916,
-            "num_policies": 100
-          },
-          "config": {
-            "model_config": {
-              "model_type": null,
-              "hidden_dims": null,
-              "dropout": 0.0,
-              "learning_rate": 0.0001,
-              "num_epochs": 5000,
-              "batch_size": 16,
-              "early_stopping_patience": 50,
-              "optimizer_type": "adamw"
-            },
-            "player_id": 0,
-            "validation_split": 0.2,
-            "max_batch_size": 30,
-            "num_trajectories_per_policy_per_epoch": 13,
-            "epochs": 32,
-            "compare_to_control": true
-          },
-          "omega_conf": {
-            "seed": 0,
-            "max_steps": 10000000,
-            "game": "classical_phantom_ttt",
-            "save_dir": "results",
-            "group_name": "test",
-            "experiment_dir": "",
-            "compute_exploitability": false,
-            "compute_exploitability_every": 500000,
-            "run_in_safe_mode": true,
-            "job_id": -1,
-            "algorithm": {
-              "algorithm_name": "ppo",
-              "anneal_lr": true,
-              "clip_coef": 0.035,
-              "clip_vloss": true,
-              "ent_coef": 0.012,
-              "gae": true,
-              "gae_lambda": 0.95,
-              "gamma": 0.99,
-              "max_grad_norm": 6,
-              "norm_adv": true,
-              "learning_rate": 5.5e-05,
-              "final_learning_rate": 5.5e-05,
-              "num_envs": 1,
-              "num_minibatches": 1,
-              "num_steps": 256,
-              "target_kl": null,
-              "update_epochs": 8,
-              "vf_coef": 0.0625,
-              "eval_every": 3
-            }
-          },
-          "control_metrics": {
-            "avg_empirical_payoff": 1.8027600049972534,
-            "avg_exact_exploitability": 3.0244905948638916,
-            "num_policies": 100
-          }
+          "posttrain": true,
+          "plot_path": "figures/task_f/kuhn_poker_neupl_True_g_p0vp1_randloss_False_N_1000_Task_F_task_f.png",
+          "solve_stats_path": "figures/task_f/kuhn_poker_neupl_True_g_p0vp1_randloss_False_N_1000_Task_F_solve_stats.json",
+          "model_dir": "2026-08-25_14-46-43-778896_033"
         }
       ],
-      "task_id": "E"
+      "task_id": "F"
+    },
+    {
+      "experiment_label": "kuhn_poker psro reconstruction-autoencoder Task F",
+      "results": [
+        {
+          "nashconv": 0.911147452302032,
+          "nashconv_baseline": 0.9106941745345789,
+          "value_at_star": 0.12011986970901489,
+          "sampled_payoff_at_star": 0.046666666865348816,
+          "val_metrics": {
+            "mse": 0.023628347111266962,
+            "mae": 0.07147164449430307,
+            "baseline_mse": 0.02297633717436795
+          },
+          "config": {
+            "value_function_model_config": {
+              "model_type": "mlp",
+              "hidden_dims": [
+                128,
+                64,
+                32
+              ],
+              "dropout": 0.0,
+              "learning_rate": 0.0001,
+              "num_epochs": 5000,
+              "batch_size": 16,
+              "early_stopping_patience": 3,
+              "optimizer_type": "adam"
+            },
+            "value_function_validation_split": 0.2,
+            "value_function_num_pairs": 10000,
+            "exact_payoff_targets": true,
+            "optimizing_player": "p1",
+            "optimizer": "gradient",
+            "outer_steps": 1400,
+            "inner_steps": 4,
+            "lr_exploited": 0.01,
+            "lr_exploiter": 0.021,
+            "cem_population": 64,
+            "cem_elite_frac": 0.125,
+            "cem_noise": 0.1,
+            "cem_step_size": 1.0,
+            "num_restarts": 2,
+            "bound_embeddings": true,
+            "trust_region": true,
+            "trust_region_quantile": 1.0,
+            "trust_region_scale": 5.0,
+            "posttrain": true,
+            "posttrain_lr": 0.0001,
+            "posttrain_anchor_batch": 64,
+            "nashconv_baseline_samples": 8,
+            "log_real_values": true,
+            "value_function_cache_dir": "results/value_fn_cache",
+            "plot_landscape": true,
+            "landscape_dim_selection": "path",
+            "landscape_grid_size": 25
+          },
+          "posttrain": true,
+          "plot_path": "figures/task_f/kuhn_poker_psro_reconstruction-autoencoder_Task_F_task_f.png",
+          "solve_stats_path": "figures/task_f/kuhn_poker_psro_reconstruction-autoencoder_Task_F_solve_stats.json",
+          "model_dir": "results/test/psro/ppo/hs256/kuhn_poker"
+        }
+      ],
+      "task_id": "F"
     }
   ]
 }

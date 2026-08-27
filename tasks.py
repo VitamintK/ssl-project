@@ -27,9 +27,10 @@ from downstream import (
     StatePayoffPredictor,
     ExploitabilityPredictor,
     EmbeddingEquilibriumSolver,
+    compute_best_response_value,
     compute_nash_conv,
-    continue_train_value_model,
     plot_solve_value_curves,
+    plot_task_f_combined,
 )
 from utils import get_expected_payoffs
 
@@ -498,6 +499,49 @@ def run_task_e(
     return result
 
 
+def _value_function_fingerprint(p1_embeddings, p2_embeddings, config: TaskFConfig, game) -> str:
+    """Stable hash of the inputs that determine the trained value function.
+
+    The checkpoint identity is carried by the cache filename (the experiment label), so
+    this only guards the value-function *configuration* and the embedding dimensionality
+    (which sets the model's input size). It deliberately ignores the sampled embedding
+    values: NeuPL pools are re-drawn from the same checkpoint each run, and a value
+    function over embedding space need not be retrained just because a fresh sample of
+    points was drawn from the same distribution.
+    """
+    import hashlib
+    h = hashlib.sha256()
+    d1 = np.array(p1_embeddings).shape[1]
+    d2 = np.array(p2_embeddings).shape[1]
+    mc = config.value_function_model_config
+    key = (str(getattr(game, "get_type", lambda: game)()), d1, d2, mc.model_type,
+           tuple(mc.hidden_dims or ()), mc.dropout, mc.num_epochs, mc.learning_rate,
+           config.value_function_num_pairs, config.value_function_validation_split,
+           config.exact_payoff_targets)
+    h.update(repr(key).encode())
+    return h.hexdigest()
+
+
+def _archive_plot(path, run_ts):
+    """Copy a saved Task F artifact into a sibling ``archive/`` dir, timestamp-prefixed.
+
+    Keeps a per-run snapshot alongside the latest-overwriting canonical path. Best-effort:
+    logs and swallows any error rather than failing the task.
+    """
+    import shutil
+    from pathlib import Path as _Path
+    try:
+        p = _Path(path)
+        adir = p.parent / "archive"
+        adir.mkdir(parents=True, exist_ok=True)
+        dest = adir / f"{run_ts}_{p.name}"
+        shutil.copy2(p, dest)
+        return str(dest)
+    except Exception as exc:
+        logger.warning(f"Could not archive {path}: {exc}")
+        return None
+
+
 def run_task_f(
     game,
     p1_policies, p1_embeddings,
@@ -506,6 +550,7 @@ def run_task_f(
     config: TaskFConfig,
     experiment_info: ExperimentInfo,
     device: str = "cpu",
+    p1_original_embeddings=None, p2_original_embeddings=None,
 ) -> dict:
     """Task F: find an equilibrium by descent-ascent in embedding space; report NashConv."""
     logger.info(f"Running Task F: {experiment_info.label_string}")
@@ -514,62 +559,149 @@ def run_task_f(
     predictor = PayoffPredictor(
         game=game, p1_policies=p1_policies, p2_policies=p2_policies,
         p1_embeddings=p1_embeddings, p2_embeddings=p2_embeddings,
-        model_config=config.model_config, device=device, num_pairs=config.num_pairs)
-    predictor.compute_ground_truth_payoffs()
-    predictor.train_with_agent_level_split(config.validation_split)
-    val_metrics = predictor.evaluate(eval_set="val")
+        model_config=config.value_function_model_config, device=device, num_pairs=config.value_function_num_pairs)
+
+    # Optional cache: skip ground-truth payoff computation + training on a fingerprint hit.
+    cache_path = None
+    fingerprint = None
+    loaded_from_cache = False
+    val_metrics = None
+    if config.value_function_cache_dir:
+        import os as _os
+        import re as _re
+        fingerprint = _value_function_fingerprint(p1_embeddings, p2_embeddings, config, game)
+        safe_label = _re.sub(r"[^0-9A-Za-z._-]+", "_", experiment_info.label_string).strip("_") or "task_f"
+        cache_path = _os.path.join(config.value_function_cache_dir, f"{safe_label}_value_fn.pt")
+        if _os.path.exists(cache_path):
+            import torch as _torch
+            blob = _torch.load(cache_path, map_location=device, weights_only=False)
+            if blob.get("fingerprint") == fingerprint:
+                predictor.trainer.model.load_state_dict(blob["state_dict"])
+                predictor.trainer.model.to(device)
+                val_metrics = blob.get("val_metrics")
+                loaded_from_cache = True
+                logger.info(f"Loaded cached value function from {cache_path}")
+            else:
+                logger.warning(f"Value-function cache at {cache_path} has a stale "
+                               f"fingerprint; retraining.")
+
+    if not loaded_from_cache:
+        predictor.compute_ground_truth_payoffs(exact=config.exact_payoff_targets)
+        predictor.train_with_agent_level_split(config.value_function_validation_split)
+        val_metrics = predictor.evaluate(eval_set="val")
+        if cache_path is not None:
+            import os as _os
+            import torch as _torch
+            _os.makedirs(config.value_function_cache_dir, exist_ok=True)
+            _torch.save({"state_dict": predictor.trainer.model.state_dict(),
+                         "fingerprint": fingerprint,
+                         "val_metrics": val_metrics}, cache_path)
+            logger.info(f"Saved trained value function to {cache_path}")
 
     pool_p1 = np.array(p1_embeddings)
     pool_p2 = np.array(p2_embeddings)
 
+    # NeuPL passes its original (pre-sampling) anchor embeddings here. Report the
+    # exact opponent best-response value against every anchor for the committed
+    # player. NeuPL policy index 0 is uniform random, so these anchors retain their
+    # native policy indices starting at 1.
+    committed_player_id = 0 if config.optimizing_player == "p1" else 1
+    committed_decoder = p1_decoder if committed_player_id == 0 else p2_decoder
+    committed_originals = (
+        p1_original_embeddings if committed_player_id == 0 else p2_original_embeddings
+    )
+    if committed_originals is not None:
+        committed_player_label = "p1" if committed_player_id == 0 else "p2"
+        original_policy_brvs = [
+            compute_best_response_value(
+                game, committed_decoder(embedding),
+                committed_player_id=committed_player_id,
+            )
+            for embedding in committed_originals
+        ]
+        logger.info(
+            "Task F NeuPL BRV against each original player_id=%s (%s) policy (N=%s): %s",
+            committed_player_id,
+            committed_player_label,
+            len(original_policy_brvs),
+            ", ".join(
+                f"policy {policy_index}={brv:.6f}"
+                for policy_index, brv in enumerate(original_policy_brvs, start=1)
+            ),
+        )
+
     # 2. Solve for an equilibrium, keeping the restart with lowest decoded NashConv.
     solver = EmbeddingEquilibriumSolver(
-        predictor.trainer.model, pool_p1, pool_p2, config, device=device)
+        game, predictor.trainer.model, pool_p1, pool_p2, p1_decoder, p2_decoder, config, device=device)
 
     def score(res):
         return compute_nash_conv(game, p1_decoder(res.e_p1), p2_decoder(res.e_p2))
 
-    result = solver.solve_best_of_restarts(score)
-
+    # Online posttraining co-trains the value model during each solve, anchored on the
+    # pretraining pool rows, with the model reset to its pretrained state per restart. On a
+    # value-function cache hit the ground truth was skipped, so compute it now (posttrain
+    # needs the anchor rows).
+    X_pre = y_pre = None
     if config.posttrain:
-        # Original pretraining rows, kept fixed so continue-training on the
-        # visited pairs doesn't catastrophically forget the pool fit.
+        if predictor.ground_truth_payoffs is None:
+            predictor.compute_ground_truth_payoffs(exact=config.exact_payoff_targets)
         X_pre = predictor._prepare_training_data()
         y_pre = predictor.ground_truth_payoffs
 
-        for _ in range(config.posttrain_rounds):
-            # gather decoded value targets for a budget-subsample of visited pairs
-            visited = result.visited
-            if len(visited) > config.posttrain_budget:
-                idx = np.random.choice(len(visited), config.posttrain_budget, replace=False)
-                visited = [visited[i] for i in idx]
-            X_new, y_new = [], []
-            for e1, e2 in visited:
-                target = get_expected_payoffs(game, p1_decoder(e1), p2_decoder(e2))
-                X_new.append(np.concatenate([e1, e2]))
-                y_new.append(target)
-            X_all = np.concatenate([X_pre, np.array(X_new)], axis=0)
-            y_all = np.concatenate([y_pre, np.array(y_new)], axis=0)
-            continue_train_value_model(
-                predictor.trainer.model, X_all, y_all,
-                epochs=config.posttrain_epochs, lr=config.posttrain_lr, device=device)
-            result = solver.solve_best_of_restarts(score)
+    result = solver.solve_best_of_restarts(
+        score, X_pre=X_pre, y_pre=y_pre, exact=config.exact_payoff_targets)
 
-    # Plot the value trajectory of each restart of the final solve (one subplot per run).
-    solve_curves_path = None
+    # Dump the raw per-step stats to JSON, and render one combined figure: one row per
+    # restart with [solve curves | P1 exploitability landscape | P2 path]. When the
+    # landscape is disabled, fall back to just the solve-curves figure.
+    plot_path = None
+    solve_stats_path = None
+    # Shared per-run timestamp so all archived artifacts from this run group together.
+    from datetime import datetime as _datetime
+    run_ts = _datetime.now().strftime("%Y%m%d_%H%M%S")
     try:
         import re as _re
+        import json as _json
         from pathlib import Path as _Path
         label = experiment_info.label_string
         safe_label = _re.sub(r"[^0-9A-Za-z._-]+", "_", label).strip("_") or "task_f"
-        solve_curves_path = str(_Path("figures") / "task_f" / f"{safe_label}_solve_curves.png")
-        plot_solve_value_curves(
-            solver.last_restart_stats, solve_curves_path,
-            title=f"Task F value curves — {label}")
-        logger.info(f"Saved solve value curves to {solve_curves_path}")
-    except Exception as exc:  # plotting is best-effort; never fail the task on it
-        logger.warning(f"Could not plot solve value curves: {exc}")
-        solve_curves_path = None
+        out_dir = _Path("figures") / "task_f"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        solve_stats_path = str(out_dir / f"{safe_label}_solve_stats.json")
+        with open(solve_stats_path, "w") as _f:
+            _json.dump({"label": label, "restarts": solver.last_restart_stats}, _f,
+                       indent=2, default=float)
+        logger.info(f"Saved solve stats to {solve_stats_path}")
+        _archive_plot(solve_stats_path, run_ts)
+
+        # The committed (optimizing) player is whose exploitability is plotted.
+        _cid = 0 if config.optimizing_player == "p1" else 1
+        if config.plot_landscape:
+            plot_path = str(out_dir / f"{safe_label}_task_f.png")
+            # Kuhn poker: cap the shared exploitability color scale at 0.45.
+            _vmax = 0.45 if game.get_type().short_name == "kuhn_poker" else None
+            _cdec = p1_decoder if _cid == 0 else p2_decoder
+            _cpool = pool_p1 if _cid == 0 else pool_p2
+            _corig = p1_original_embeddings if _cid == 0 else p2_original_embeddings
+            plot_task_f_combined(
+                solver.last_restart_stats, solver.last_restart_results,
+                game, _cdec, plot_path,
+                dim_selection=config.landscape_dim_selection,
+                grid_size=config.landscape_grid_size,
+                committed_player_id=_cid, committed_pool=_cpool,
+                committed_originals=_corig, landscape_vmax=_vmax,
+                title=f"Task F — {label}")
+        else:
+            plot_path = str(out_dir / f"{safe_label}_solve_curves.png")
+            plot_solve_value_curves(
+                solver.last_restart_stats, plot_path,
+                title=f"Task F value curves — {label}",
+                committed_player_id=_cid)
+        logger.info(f"Saved Task F figure to {plot_path}")
+        _archive_plot(plot_path, run_ts)
+    except Exception as exc:  # plotting/dumping is best-effort; never fail the task on it
+        logger.warning(f"Could not save Task F figure/stats: {exc}")
 
     # 3. Evaluate the recovered profile.
     p1_star = p1_decoder(result.e_p1)
@@ -594,6 +726,7 @@ def run_task_f(
         "sampled_payoff_at_star": float(sampled_payoff),
         "val_metrics": val_metrics,
         "config": config_to_dict(config),
-        "posttrain_rounds": config.posttrain_rounds if config.posttrain else 0,
-        "solve_curves_path": solve_curves_path,
+        "posttrain": bool(config.posttrain),
+        "plot_path": plot_path,
+        "solve_stats_path": solve_stats_path,
     }

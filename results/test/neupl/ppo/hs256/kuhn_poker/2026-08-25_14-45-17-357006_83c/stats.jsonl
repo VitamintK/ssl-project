@@ -1,0 +1,5 @@
+{"episodes": 26560, "episodes_training": 6400, "episodes_payoff": 20160, "walltime": 6.3803368749941, "exploitability": 0.3537170642192702, "exploitability_per_player": [0.31325028492145895, 0.39418384351708136]}
+{"episodes": 53440, "episodes_training": 32000, "episodes_payoff": 21440, "walltime": 22.12377687499975, "exploitability": 0.32187972189419967, "exploitability_per_player": [0.5990099977382686, 0.0447494460501307]}
+{"episodes": 80320, "episodes_training": 57600, "episodes_payoff": 22720, "walltime": 37.87500087500666, "exploitability": 0.32040943566212937, "exploitability_per_player": [0.633812267920635, 0.00700660340362369]}
+{"episodes": 107200, "episodes_training": 83200, "episodes_payoff": 24000, "walltime": 53.765334750001784, "exploitability": 0.3232875121017127, "exploitability_per_player": [0.6252122425792548, 0.021362781624170657]}
+{"episodes": 152560, "episodes_training": 102400, "episodes_payoff": 50160, "walltime": 70.3811004159943, "exploitability": 0.2891403437236916, "exploitability_per_player": [0.5776855665956375, 0.0005951208517455675]}
