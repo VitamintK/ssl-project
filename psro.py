@@ -95,7 +95,11 @@ def best_response_value(game, fixed_policy, fixed_player, br_player):
     return float(responder.value(game.new_initial_state()))
 
 
-def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, T: int = None, debug: bool = False, gt_payoffs: bool = False, save_logs: bool = False):
+def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, T: int = None,
+                 debug: bool = False, gt_payoffs: bool = False, save_logs: bool = False,
+                 aspro: bool = False, exploited_player: str = 'p1', bandit: str = 'hedge',
+                 num_iterations: int = 680, num_pols_sampled: int = 8,
+                 total_episodes_per_policy: int = 400, expl_check_episode_interval: int = None):
     """Custom NeuPL training loop.
 
     Replaces the iig_run_psro.RunPSRO-based loop with a hand-written one.
@@ -109,6 +113,12 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
     K increments by 1 each outer iteration until it reaches N.
     """
     os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
+    if aspro and (use_randall_loss or gt_payoffs):
+        raise ValueError("aspro is incompatible with use_randall_loss / gt_payoffs "
+                         "(they require the payoff matrix, which aspro does not build)")
+    if exploited_player not in ("p1", "p2"):
+        raise ValueError(f"exploited_player must be 'p1' or 'p2', got {exploited_player!r}")
 
     import time
     import copy as _copy
@@ -131,10 +141,10 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
     N = alg.num_policies
     sims_per_entry = alg.sims_per_entry
     # number_training_episodes = alg.number_training_episodes
-    num_pols_sampled = 8   # outer iters: how many policies to sample per train call
-    total_episodes_per_policy = 400                 # inner iters: episodes collected before each learn() call
+    # num_pols_sampled / total_episodes_per_policy / num_iterations are function params.
     # expl_check_episode_interval = 20000
-    expl_check_episode_interval = args.algorithm.expl_check_episode_interval
+    if expl_check_episode_interval is None:
+        expl_check_episode_interval = args.algorithm.expl_check_episode_interval
     RANDALL_LR = 0.0003
     RANDALL_LOSS_EPOCHS = 1
 
@@ -570,7 +580,7 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
 
     if T is None:
         T = N * 15
-    num_iterations = 680  # run until k has reached N; extend beyond T if desired
+    # num_iterations is a function param (default 680): run until k reaches N.
 
     # ── timing helpers ────────────────────────────────────────────────────────
 
