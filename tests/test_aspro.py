@@ -47,3 +47,23 @@ def test_aspro_smoke_runs_and_logs_brv(exploited, bandit):
     assert len(records[-1]["brv_per_policy"]) >= 1
     assert os.path.exists(os.path.join(exp, "brv.png"))
     assert os.path.exists(os.path.join(exp, "policy0_ckpt.pt"))
+
+
+def test_aspro_checkpoint_is_loadable():
+    from psro import load_ppo_agents_from_neupl
+    run_neupl_v2(
+        game_name="kuhn_poker", aspro=True, exploited_player="p1", bandit="hedge",
+        num_iterations=1, num_pols_sampled=2, total_episodes_per_policy=3, T=1,
+        expl_check_episode_interval=1,
+    )
+    exp = _latest_experiment_dir()
+    # config.json must record num_policies so the loader sizes the embedding table right.
+    with open(os.path.join(exp, "config.json")) as f:
+        cfg = json.load(f)
+    assert cfg["num_policies"] >= 2
+    # Round-trip through the standard NeuPL loader (hidden_size/embedding must match training).
+    dir_name = os.path.basename(os.path.normpath(exp))
+    a0, a1 = load_ppo_agents_from_neupl(
+        "kuhn_poker", hidden_size=256, policy_embedding_size=64, dir_name=dir_name)
+    assert a0.num_policies == cfg["num_policies"]
+    assert a1 is not None

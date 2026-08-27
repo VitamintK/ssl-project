@@ -683,6 +683,16 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
         bandits = {i: make_bandit(bandit, num_arms=i, reward_range=reward_range, seed=i)
                    for i in range(1, N)}
 
+        # Write config.json so the checkpoint loader sizes the embedding table correctly
+        # (load_ppo_agents_from_neupl reads num_policies from it; default 100 would mismatch).
+        aspro_config = OmegaConf.to_container(alg, resolve=True)
+        aspro_config['num_policies'] = N
+        aspro_config['aspro'] = True
+        aspro_config['exploited_player'] = exploited_player
+        aspro_config['bandit'] = bandit
+        with open(os.path.join(experiment_dir, 'config.json'), 'w') as f:
+            json.dump(aspro_config, f)
+
         def _episode_agents(train_player, train_pol, opp_pol):
             """Order agents by player id for oracle.sample_episode."""
             pair = [None, None]
