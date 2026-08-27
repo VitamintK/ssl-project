@@ -73,6 +73,28 @@ def run_neupl(game_name: str = 'kuhn_poker', use_randall_loss=False):
 
 
 
+def best_response_value(game, fixed_policy, fixed_player, br_player):
+    """Value ``br_player`` gets by exactly best-responding to ``fixed_policy``.
+
+    ``fixed_policy`` plays ``fixed_player``; only its states matter. Requires
+    ``fixed_policy.action_probabilities(state)`` (OpenSpiel Policy interface).
+    """
+    from open_spiel.python import policy as policy_lib
+    from open_spiel.python.algorithms import best_response as _best_response
+
+    profile = policy_lib.TabularPolicy(game)  # opponent (br_player) rows are ignored
+    for state in profile.states:
+        if state.current_player() != fixed_player:
+            continue
+        probs = fixed_policy.action_probabilities(state)
+        row = profile.action_probability_array[profile.state_index(state)]
+        row[:] = 0.0
+        for action, p in probs.items():
+            row[action] = p
+    responder = _best_response.BestResponsePolicy(game, br_player, profile)
+    return float(responder.value(game.new_initial_state()))
+
+
 def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, T: int = None, debug: bool = False, gt_payoffs: bool = False, save_logs: bool = False):
     """Custom NeuPL training loop.
 
