@@ -97,9 +97,11 @@ def best_response_value(game, fixed_policy, fixed_player, br_player):
 
 def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, T: int = None,
                  debug: bool = False, gt_payoffs: bool = False, save_logs: bool = False,
-                 aspro: bool = False, exploited_player: str = 'p1', bandit: str = 'hedge',
+                 apsro: bool = False, apsro_exploited_player: str = 'p1', apsro_bandit: str = 'hedge',
+                 apsro_exploited_lr_scale: float = 1.0,
                  num_iterations: int = 680, num_pols_sampled: int = 8,
-                 total_episodes_per_policy: int = 400, expl_check_episode_interval: int = None):
+                 total_episodes_per_policy: int = 400, expl_check_episode_interval: int = None,
+                 save_checkpoints: bool = True):
     """Custom NeuPL training loop.
 
     Replaces the iig_run_psro.RunPSRO-based loop with a hand-written one.
@@ -114,11 +116,11 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
     """
     os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
-    if aspro and (use_randall_loss or gt_payoffs):
-        raise ValueError("aspro is incompatible with use_randall_loss / gt_payoffs "
-                         "(they require the payoff matrix, which aspro does not build)")
-    if exploited_player not in ("p1", "p2"):
-        raise ValueError(f"exploited_player must be 'p1' or 'p2', got {exploited_player!r}")
+    if apsro and (use_randall_loss or gt_payoffs):
+        raise ValueError("apsro is incompatible with use_randall_loss / gt_payoffs "
+                         "(they require the payoff matrix, which apsro does not build)")
+    if apsro_exploited_player not in ("p1", "p2"):
+        raise ValueError(f"apsro_exploited_player must be 'p1' or 'p2', got {apsro_exploited_player!r}")
 
     import time
     import copy as _copy
@@ -226,8 +228,8 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
         ]
         for player_id in range(2)
     ]
-    if aspro:
-        E = 0 if exploited_player == 'p1' else 1   # exploited (uniform anchor at index 0)
+    if apsro:
+        E = 0 if apsro_exploited_player == 'p1' else 1   # exploited (uniform anchor at index 0)
         X = 1 - E                                  # exploiter (index 0 stays trainable BR)
         agents[E][0] = rl_policy.UniformRandomAgentPolicy(env, E, num_actions=num_actions)
     else:
@@ -577,6 +579,8 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
                              _fmt(br_payoff), _fmt(abs(current_payoff - br_payoff)))
 
     def _save_checkpoint():
+        if not save_checkpoints:
+            return
         # All policies share one network per player; overwrite a single file each time.
         for pid in range(2):
             net = agents[pid][1]._policy.agent.network
@@ -669,10 +673,17 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
                 for pg in opt.param_groups:
                     pg['lr'] = lr
 
+    def _set_player_lr(player, lr, start=1):
+        """Set LR for one player's trainable policies (indices start..N-1)."""
+        for pi in range(start, N):
+            opt = agents[player][pi]._policy.agent.optimizer
+            for pg in opt.param_groups:
+                pg['lr'] = lr
+
     def _set_payoff_matrix_update_rate(update_rate):
         state.payoff_matrix_update_rate = update_rate
 
-    if aspro:
+    if apsro:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
@@ -680,19 +691,20 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
 
         reward_range = (game.min_utility(), game.max_utility())
         # One persistent bandit per exploited policy index i, over arms {0..i-1}.
-        bandits = {i: make_bandit(bandit, num_arms=i, reward_range=reward_range, seed=i)
+        bandits = {i: make_bandit(apsro_bandit, num_arms=i, reward_range=reward_range, seed=i)
                    for i in range(1, N)}
 
         # Write config.json so the checkpoint loader sizes the embedding table correctly
         # (load_ppo_agents_from_neupl reads num_policies from it; default 100 would mismatch).
-        aspro_config = OmegaConf.to_container(alg, resolve=True)
-        aspro_config['num_policies'] = N
-        aspro_config['use_randall_loss'] = use_randall_loss  # so select_neupl_directory surfaces it
-        aspro_config['aspro'] = True
-        aspro_config['exploited_player'] = exploited_player
-        aspro_config['bandit'] = bandit
-        with open(os.path.join(experiment_dir, 'config.json'), 'w') as f:
-            json.dump(aspro_config, f)
+        apsro_config = OmegaConf.to_container(alg, resolve=True)
+        apsro_config['num_policies'] = N
+        apsro_config['use_randall_loss'] = use_randall_loss  # so select_neupl_directory surfaces it
+        apsro_config['apsro'] = True
+        apsro_config['exploited_player'] = apsro_exploited_player
+        apsro_config['bandit'] = apsro_bandit
+        if save_checkpoints:  # config.json is what select_neupl_directory lists; skip in tests
+            with open(os.path.join(experiment_dir, 'config.json'), 'w') as f:
+                json.dump(apsro_config, f)
 
         def _episode_agents(train_player, train_pol, opp_pol):
             """Order agents by player id for oracle.sample_episode."""
@@ -703,8 +715,10 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
 
         def _train_exploited(k):
             """Train E's policies 1..k against their bandit mixture over X's {0..i-1}."""
+            _sampled = []
             for _ in range(num_pols_sampled):
                 i = min(random.randint(1, k + 1), N - 1)
+                _sampled.append(i)
                 training_pol = agents[E][i]
                 training_pol.unfreeze()
                 b = bandits[i]
@@ -718,11 +732,16 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
                     state.episodes_played += 1
                     state.episodes_training += 1
                 _force_learn(training_pol, E)
+            if debug:
+                logger.debug("  [apsro] exploited (E=p%s) policies sampled this iter: %s",
+                             E + 1, _sampled)
 
         def _train_exploiter(k):
             """Train X's policies 0..k as a pure best response to E's same-index policy."""
+            _sampled = []
             for _ in range(num_pols_sampled):
                 i = min(random.randint(0, k + 1), N - 1)
+                _sampled.append(i)
                 training_pol = agents[X][i]
                 training_pol.unfreeze()
                 opp = agents[E][i]
@@ -733,6 +752,9 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
                     state.episodes_played += 1
                     state.episodes_training += 1
                 _force_learn(training_pol, X)
+            if debug:
+                logger.debug("  [apsro] exploiter (X=p%s) policies sampled this iter: %s",
+                             X + 1, _sampled)
 
         def _plot_brv(records):
             if not records:
@@ -776,10 +798,10 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
             logger.info("  BRV per exploited policy (k=%s): %s",
                         k, "  ".join(f"E_{i}={v:.4f}" for i, v in enumerate(brvs)))
             if debug:
-                _debug_aspro(k)
+                _debug_apsro(k)
             _plot_brv(state.stats)
 
-        def _debug_aspro(k):
+        def _debug_apsro(k):
             """Per exploited policy i (1..k): E's exact payoff vs each opponent X_j, that
             opponent's current bandit probability, and E_i's EV against the mixture."""
             from open_spiel.python.algorithms import expected_game_score
@@ -789,7 +811,7 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
                 pair[E], pair[X] = agents[E][i], agents[X][j]
                 return expected_game_score.policy_value(game.new_initial_state(), pair)[E]
 
-            logger.debug("  [aspro debug] E payoff vs each exploiter (payoff | bandit %%):")
+            logger.debug("  [apsro debug] E payoff vs each exploiter (payoff | bandit %%):")
             for i in range(1, k + 1):
                 dist = bandits[i].distribution()
                 cells = []
@@ -805,8 +827,13 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
         for it in range(1, num_iterations + 1):
             k = min(N - 1, max(1, int(np.ceil(it / T * (N - 1)))))
             t = min(it - 1, lr_anneal_iters - 1) / max(lr_anneal_iters - 1, 1)
-            _set_lr(base_lr + (final_lr - base_lr) * t)
-            logger.info("  [aspro] iteration %s/%s  k=%s/%s", it, num_iterations, k, N - 1)
+            lr = base_lr + (final_lr - base_lr) * t
+            # Exploited (E) can train at a scaled (typically smaller) LR; E_0 is uniform (no
+            # optimizer), so start at 1. X_0 is a trainable BR, so include index 0 for X.
+            _set_player_lr(E, lr * apsro_exploited_lr_scale, start=1)
+            _set_player_lr(X, lr, start=0)
+            logger.info("  [apsro] iteration %s/%s  k=%s/%s  lr=%.2e (E x%.3g)",
+                        it, num_iterations, k, N - 1, lr, apsro_exploited_lr_scale)
             _train_exploited(k)
             _train_exploiter(k)
             _measure_brv(k)
@@ -1038,6 +1065,7 @@ def select_neupl_directory(
         game_short_name: str,
         use_randall_loss: bool,
         hidden_size: int = 512,
+        num_directories: int = 15,
 ) -> str:
     """Prompt the user to pick a NEUPL checkpoint directory and return its name.
 
@@ -1063,7 +1091,7 @@ def select_neupl_directory(
                 print(f"Warning: Failed to parse {config_path}: {e}")
         # skip dirs without a config when filtering by use_randall_loss
 
-    recent = filtered[:10]
+    recent = filtered[:num_directories]
     print(f"\nNEUPL directories for use_randall_loss={use_randall_loss}:")
     dir_info = []
     for idx, subdir in enumerate(recent):
@@ -1083,8 +1111,8 @@ def select_neupl_directory(
         extras = []
         if num_pol is not None:
             extras.append(f"num_policies={num_pol}")
-        if cfg.get("aspro"):
-            extras.append(f"aspro(exploited={cfg.get('exploited_player')},bandit={cfg.get('bandit')})")
+        if cfg.get("apsro"):
+            extras.append(f"apsro(exploited={cfg.get('exploited_player')},bandit={cfg.get('bandit')})")
         if final_expl is not None:
             extras.append(f"final_expl={final_expl:.4f}")
         extras_str = ("  " + "  ".join(extras)) if extras else ""
@@ -1321,11 +1349,13 @@ if __name__ == '__main__':
     parser.add_argument('--debug', action='store_true', help='Enable debug mode for neupl_v2')
     parser.add_argument('--save_logs', action='store_true', help='Save NeuPL v2 logs under logs/neupl/')
     parser.add_argument('--gt_payoffs', action='store_true', help='Use ground-truth payoffs for Nash computation instead of the EMA payoff table')
-    parser.add_argument('--aspro', action='store_true', help='Asymmetric APSRO in neupl_v2')
-    parser.add_argument('--exploited_player', choices=['p1', 'p2'], default='p1',
+    parser.add_argument('--apsro', action='store_true', help='Asymmetric APSRO in neupl_v2')
+    parser.add_argument('--apsro_exploited_player', choices=['p1', 'p2'], default='p1',
                         help='Which player APSRO optimizes/measures')
-    parser.add_argument('--bandit', choices=['hedge', 'rm'], default='hedge',
+    parser.add_argument('--apsro_bandit', choices=['hedge', 'rm'], default='hedge',
                         help='Adversarial bandit for the exploited player')
+    parser.add_argument('--apsro_exploited_lr_scale', type=float, default=1.0,
+                        help='Multiplier on the exploited player PPO learning rate (apsro)')
     args = parser.parse_args()
     if args.use_randall_loss:
         assert args.neupl or args.neupl_v2, "Use randall loss only with neupl"
@@ -1334,7 +1364,9 @@ if __name__ == '__main__':
     if args.neupl_v2:
         run_neupl_v2(game_name, use_randall_loss=args.use_randall_loss, T=args.T,
                      debug=args.debug, gt_payoffs=args.gt_payoffs, save_logs=args.save_logs,
-                     aspro=args.aspro, exploited_player=args.exploited_player, bandit=args.bandit)
+                     apsro=args.apsro, apsro_exploited_player=args.apsro_exploited_player,
+                     apsro_bandit=args.apsro_bandit,
+                     apsro_exploited_lr_scale=args.apsro_exploited_lr_scale)
     elif args.neupl:
         run_neupl(game_name, use_randall_loss=args.use_randall_loss)
     else:
