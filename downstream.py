@@ -1638,37 +1638,53 @@ class EmbeddingEquilibriumSolver:
         with torch.no_grad():
             return self.model(X).detach().cpu().numpy()
 
-    def _cem_step(self, e1, e2, which):
-        """One cross-entropy-method step for the given player (which=1 P1 max, 2 P2 min).
+    def _sample_population(self, base_np, noise):
+        """cem_population + 1 candidates: the current point plus Gaussian perturbations."""
+        d = base_np.shape[0]
+        return np.vstack([base_np[None],
+                          base_np[None] + noise * np.random.randn(self.config.cem_population, d).astype(np.float32)])
 
-        Samples ``cem_population`` candidates around the current embedding, keeps the
-        best-scoring ``cem_elite_frac`` (top V for P1, bottom V for P2), and moves toward
-        their mean by ``cem_step_size``. Gradient-free; constrained like a gradient step.
-        """
-        cfg = self.config
+    def _cem_weights(self, vals, which):
+        """Hard top-k elite weights (uniform over the elites, 0 elsewhere)."""
+        m = max(1, int(round(self.config.cem_elite_frac * len(vals))))
+        order = np.argsort(vals)
+        elite = order[-m:] if which == 1 else order[:m]  # P1 maximizes V, P2 minimizes
+        w = np.zeros(len(vals), dtype=np.float64)
+        w[elite] = 1.0 / m
+        return w
+
+    def _mppi_weights(self, vals, which):
+        """Softmax weights over all samples (temperature ``mppi_temperature``)."""
+        scores = vals if which == 1 else -vals  # higher = better for this player
+        z = scores - scores.max()
+        w = np.exp(z / max(self.config.mppi_temperature, 1e-8))
+        return w / w.sum()
+
+    def _population_step(self, e1, e2, which, noise, weights_fn):
+        """One gradient-free step: sample a population, weight it by ``weights_fn``, and move
+        toward the weighted mean by ``cem_step_size``. Constrained like a gradient step."""
         base, other = (e1, e2) if which == 1 else (e2, e1)
         base_np = base.detach().cpu().numpy().astype(np.float32)
-        d = base_np.shape[0]
-        pop = np.vstack([base_np[None],
-                         base_np[None] + cfg.cem_noise * np.random.randn(cfg.cem_population, d).astype(np.float32)])
+        pop = self._sample_population(base_np, noise)
         vals = self._value_pop(pop, other, which)
-        m = max(1, int(round(cfg.cem_elite_frac * pop.shape[0])))
-        order = np.argsort(vals)
-        elite_idx = order[-m:] if which == 1 else order[:m]  # P1 maximizes, P2 minimizes
-        elite_mean = pop[elite_idx].mean(0)
-        new_np = base_np + cfg.cem_step_size * (elite_mean - base_np)
+        w = weights_fn(vals, which)
+        target = (w[:, None] * pop).sum(0)
+        new_np = base_np + self.config.cem_step_size * (target - base_np)
         new = torch.as_tensor(new_np, dtype=torch.float32, device=self.device)
         with torch.no_grad():
             new = self._constrain(new, which=which)
         new.requires_grad_(True)
         return new
 
-    def _player_step(self, e1, e2, which, lr):
+    def _player_step(self, e1, e2, which, lr, noise):
         """One update for the ``which`` player (1 = P1 max, 2 = P2 min), dispatched by
-        ``config.optimizer`` (gradient descent-ascent or CEM). ``lr`` is used by gradient
-        only. Returns the updated embedding for that player."""
-        if self.config.optimizer == "cem":
-            return self._cem_step(e1, e2, which)
+        ``config.optimizer``: "gradient" uses ``lr``; "cem"/"mppi" are gradient-free and use
+        ``noise`` (the population sampling std). Returns the updated embedding."""
+        opt = self.config.optimizer
+        if opt == "cem":
+            return self._population_step(e1, e2, which, noise, self._cem_weights)
+        if opt == "mppi":
+            return self._population_step(e1, e2, which, noise, self._mppi_weights)
         v = self._value(e1, e2)
         return self._ascend_p1(v, e1, lr) if which == 1 else self._descend_p2(v, e2, lr)
 
@@ -1697,6 +1713,7 @@ class EmbeddingEquilibriumSolver:
         # lr_exploiter -- regardless of which is P1/P2.
         committed_id = 0 if cfg.optimizing_player == "p1" else 1
         lr_out, lr_in = cfg.lr_exploited, cfg.lr_exploiter
+        noise_out, noise_in = cfg.cem_noise_exploited, cfg.cem_noise_exploiter
 
         self._tr_fired_p1 = self._tr_fired_p2 = False  # updated by _constrain
         visited = []
@@ -1739,16 +1756,16 @@ class EmbeddingEquilibriumSolver:
                 stats.append(stat)
                 # inner update: the fast (non-committed / exploiter) player
                 if committed_id == 0:
-                    e2 = self._player_step(e1, e2, which=2, lr=lr_in)   # inner = P2
+                    e2 = self._player_step(e1, e2, which=2, lr=lr_in, noise=noise_in)   # inner = P2
                 else:
-                    e1 = self._player_step(e1, e2, which=1, lr=lr_in)   # inner = P1
+                    e1 = self._player_step(e1, e2, which=1, lr=lr_in, noise=noise_in)   # inner = P1
                 if online:  # co-train V on the freshly stepped (e1, e2)
                     self._online_update(e1, e2, opt, X_pre, y_pre, exact)
             # outer step: the committed (slow / exploited) player
             if committed_id == 0:
-                e1 = self._player_step(e1, e2, which=1, lr=lr_out)      # outer = P1
+                e1 = self._player_step(e1, e2, which=1, lr=lr_out, noise=noise_out)      # outer = P1
             else:
-                e2 = self._player_step(e1, e2, which=2, lr=lr_out)      # outer = P2
+                e2 = self._player_step(e1, e2, which=2, lr=lr_out, noise=noise_out)      # outer = P2
             if online:  # co-train V on the freshly stepped (e1, e2)
                 self._online_update(e1, e2, opt, X_pre, y_pre, exact)
             visited.append((e1.detach().cpu().numpy().copy(),
@@ -2341,7 +2358,7 @@ def plot_task_f_combined(
                     rel = _player_path(result, cid) - g["mu"]
                     pa, pb = rel @ g["e1"], rel @ g["e2"]
                     col = cmap(k % 10)
-                    ax_ov.plot(pa, pb, color=col, lw=1.6, alpha=0.9, label=f"restart {k}")
+                    ax_ov.plot(pa, pb, color=col, lw=2, alpha=0.9, label=f"restart {k}")
                     ax_ov.scatter([pa[-1]], [pb[-1]], color=col, marker="*", s=60,
                                   edgecolor="black", zorder=7)
                 ax_ov.legend(fontsize=6, loc="best")

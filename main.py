@@ -1139,35 +1139,39 @@ def _run_experiment(spec: dict) -> tuple:
             value_function_model_config=model_cfg,
             value_function_num_pairs=ov.get('num_pairs', 10000),
             optimizing_player=ov.get('optimizing_player', 'p1'),
-            optimizer=ov.get('optimizer', 'gradient'),
+            optimizer=ov.get('optimizer', 'cem'),
             cem_population=ov.get('cem_population', 64),
             cem_elite_frac=ov.get('cem_elite_frac', 0.125),
-            cem_noise=ov.get('cem_noise', 0.1),
+            cem_noise_exploited=ov.get('cem_noise_exploited', ov.get('cem_noise', 0.1)),
+            cem_noise_exploiter=ov.get('cem_noise_exploiter', ov.get('cem_noise', 0.3)),
             cem_step_size=ov.get('cem_step_size', 1.0),
-            outer_steps=ov.get('outer_steps', 1400),
+            mppi_temperature=ov.get('mppi_temperature', 1.0),
+            outer_steps=ov.get('outer_steps', 1600),
             inner_steps=ov.get('inner_steps', 4), # 9 
             lr_exploited=ov.get('lr_exploited', 1e-2),
             lr_exploiter=ov.get('lr_exploiter', 2.1e-2),
             num_restarts=ov.get('num_restarts', 2),
             bound_embeddings=ov.get('bound_embeddings', True),
-            posttrain=ov.get('posttrain', True),
+            posttrain=ov.get('posttrain', False),
             posttrain_lr=ov.get('posttrain_lr', 1e-4),
             posttrain_anchor_batch=ov.get('posttrain_anchor_batch', 64),
             nashconv_baseline_samples=ov.get('nashconv_baseline_samples', 8),
             log_real_values=ov.get('log_real_values', False),
             value_function_cache_dir=ov.get('value_function_cache_dir', None),
+            value_function_cache_ignore=ov.get('value_function_cache_ignore', False),
             plot_landscape=ov.get('plot_landscape', False),
             landscape_dim_selection=ov.get('landscape_dim_selection', 'path'),
             landscape_grid_size=ov.get('landscape_grid_size', 25),
             trust_region=ov.get('trust_region', False),
             trust_region_quantile=ov.get('trust_region_quantile', 1.0),
-            trust_region_scale=ov.get('trust_region_scale', 5.0),
+            trust_region_scale=ov.get('trust_region_scale', 2.0),
             exact_payoff_targets=ov.get('exact_payoff_targets', False))
         result = run_task_f(game=game, p1_policies=policies, p1_embeddings=embeddings,
                             p2_policies=p2_policies, p2_embeddings=p2_embeddings,
                             p1_decoder=p1_decoder, p2_decoder=p2_decoder,
                             p1_original_embeddings=original_embeddings,
                             p2_original_embeddings=p2_original_embeddings,
+                            checkpoint_id=model_dir,
                             config=config, experiment_info=experiment_info, device=device)
     else:
         raise ValueError(f"Unknown task: {task}")
@@ -1203,6 +1207,10 @@ if __name__ == "__main__":
     _parser.add_argument("--game-name", type=str, default="kuhn_poker", help="Game to run", choices=["kuhn_poker", "leduc_poker"])
     _parser.add_argument("--device", type=str, default=None, help="Device to use (e.g. cpu, cuda, mps); defaults to auto-detect")
     _parser.add_argument("--policy-device", type=str, default="cpu", help="Device to load opponent policies onto (default: cpu)")
+    _parser.add_argument("--f-ignore-value-fn-cache", action="store_true",
+                         help="Task F: ignore any cached value function and retrain from scratch (still refreshes the cache)")
+    _parser.add_argument("--f-optimizer", choices=["gradient", "cem", "mppi"], default=None,
+                         help="Task F: embedding-space optimizer (overrides the spec default)")
     _args = _parser.parse_args()
 
     # run_all()
@@ -1216,7 +1224,7 @@ if __name__ == "__main__":
     RUN_TASK_F = True
 
     RUN_NEUPL = True
-    RUN_PSRO = True
+    RUN_PSRO = False
     RUN_RANDOM = False
 
     RUN_IDENTITY = False
@@ -1394,7 +1402,8 @@ if __name__ == "__main__":
                                                        'value_function_cache_dir': 'results/value_fn_cache',
                                                        'plot_landscape': True,
                                                        'trust_region': True,
-                                                       'exact_payoff_targets': True},
+                                                       'exact_payoff_targets': True,
+                                                       },
                                   'experiment_info': ExperimentInfo(
                                       f'{game_short_name} ppo random 0 {emb_type} Task F',
                                       embedding_type=emb_type, task_id='F')})
@@ -1403,6 +1412,13 @@ if __name__ == "__main__":
     for spec in specs:
         spec['device'] = device
         spec['policy_device'] = policy_device
+        # Propagate the --f-ignore-value-fn-cache CLI flag into Task F overrides (workers can't
+        # see _args), without clobbering an explicit per-spec override.
+        if spec.get('task') == 'f' and _args.f_ignore_value_fn_cache:
+            spec.setdefault('task_f_overrides', {}).setdefault('value_function_cache_ignore', True)
+        # --f-optimizer, when given, overrides the Task F optimizer.
+        if spec.get('task') == 'f' and _args.f_optimizer is not None:
+            spec.setdefault('task_f_overrides', {})['optimizer'] = _args.f_optimizer
 
     if _args.no_multiprocessing:
         logger.info(f"Running {len(specs)} jobs sequentially (no multiprocessing)")

@@ -502,8 +502,8 @@ def run_task_e(
 def _value_function_fingerprint(p1_embeddings, p2_embeddings, config: TaskFConfig, game) -> str:
     """Stable hash of the inputs that determine the trained value function.
 
-    The checkpoint identity is carried by the cache filename (the experiment label), so
-    this only guards the value-function *configuration* and the embedding dimensionality
+    The checkpoint identity is carried by the cache filename (experiment label + checkpoint
+    id), so this only guards the value-function *configuration* and the embedding dimensionality
     (which sets the model's input size). It deliberately ignores the sampled embedding
     values: NeuPL pools are re-drawn from the same checkpoint each run, and a value
     function over embedding space need not be retrained just because a fresh sample of
@@ -520,6 +520,27 @@ def _value_function_fingerprint(p1_embeddings, p2_embeddings, config: TaskFConfi
            config.exact_payoff_targets)
     h.update(repr(key).encode())
     return h.hexdigest()
+
+
+def _log_pool_exploitability(game, p1_policies, p2_policies):
+    """Log exact-exploitability (best-response value) stats over each player's pool policies.
+
+    For each pool, computes BRV against every sampled policy and reports min / quartiles /
+    max / mean. The min is the least-exploitable single pure policy in the pool -- a
+    baseline the Task F solve should aim to beat.
+    """
+    def _stats(policies, cid, name):
+        if not policies:
+            return
+        vals = np.array([compute_best_response_value(game, p, committed_player_id=cid)
+                         for p in policies])
+        q = np.percentile(vals, [0, 25, 50, 75, 100])
+        logger.info(
+            "  Pool exploitability (%s, n=%d): min=%.4f  q25=%.4f  median=%.4f  q75=%.4f  "
+            "max=%.4f  mean=%.4f", name, len(vals), q[0], q[1], q[2], q[3], q[4], vals.mean())
+
+    _stats(list(p1_policies), 0, "P1")
+    _stats(list(p2_policies), 1, "P2")
 
 
 def _archive_plot(path, run_ts):
@@ -551,6 +572,7 @@ def run_task_f(
     experiment_info: ExperimentInfo,
     device: str = "cpu",
     p1_original_embeddings=None, p2_original_embeddings=None,
+    checkpoint_id=None,
 ) -> dict:
     """Task F: find an equilibrium by descent-ascent in embedding space; report NashConv."""
     logger.info(f"Running Task F: {experiment_info.label_string}")
@@ -571,8 +593,14 @@ def run_task_f(
         import re as _re
         fingerprint = _value_function_fingerprint(p1_embeddings, p2_embeddings, config, game)
         safe_label = _re.sub(r"[^0-9A-Za-z._-]+", "_", experiment_info.label_string).strip("_") or "task_f"
-        cache_path = _os.path.join(config.value_function_cache_dir, f"{safe_label}_value_fn.pt")
-        if _os.path.exists(cache_path):
+        # Checkpoint identity in the FILENAME so two different training runs with the same
+        # label (e.g. same game/randloss/N but a different NeuPL run_dir) don't collide.
+        ckpt_tag = _re.sub(r"[^0-9A-Za-z._-]+", "_",
+                           _os.path.basename(str(checkpoint_id))).strip("_") if checkpoint_id else "nockpt"
+        cache_path = _os.path.join(config.value_function_cache_dir, f"{safe_label}_{ckpt_tag}_value_fn.pt")
+        if config.value_function_cache_ignore and _os.path.exists(cache_path):
+            logger.info(f"Ignoring cached value function at {cache_path} (retraining from scratch)")
+        if _os.path.exists(cache_path) and not config.value_function_cache_ignore:
             import torch as _torch
             blob = _torch.load(cache_path, map_location=device, weights_only=False)
             if blob.get("fingerprint") == fingerprint:
@@ -589,6 +617,9 @@ def run_task_f(
         predictor.compute_ground_truth_payoffs(exact=config.exact_payoff_targets)
         predictor.train_with_agent_level_split(config.value_function_validation_split)
         val_metrics = predictor.evaluate(eval_set="val")
+        # Exact exploitability (best-response value) of the sampled pool policies -- a
+        # reference baseline for what the solve should beat. Only when training from scratch.
+        _log_pool_exploitability(game, p1_policies, p2_policies)
         if cache_path is not None:
             import os as _os
             import torch as _torch

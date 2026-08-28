@@ -196,19 +196,24 @@ class TaskFConfig:
     # track; the other player is the fast (inner-loop) best-responder. "p1" (player 0,
     # maximizes V) is the default; "p2" (player 1, minimizes V) swaps the two roles.
     optimizing_player: Literal["p1", "p2"] = "p1"
-    # how each player's per-step update is computed: "gradient" (descent-ascent on V, the
-    # default) or "cem" (gradient-free cross-entropy method -- sample a population around the
-    # current embedding, keep the best-scoring elites, move to their mean).
-    optimizer: Literal["gradient", "cem"] = "gradient"
+    # how each player's per-step update is computed:
+    #   "gradient" (descent-ascent on V, the default),
+    #   "cem"  (gradient-free cross-entropy method -- sample a population, keep the top-k
+    #           elites, move to their mean),
+    #   "mppi" (like cem, but softmax-weight ALL samples by value instead of a hard top-k).
+    optimizer: Literal["gradient", "cem", "mppi"] = "gradient"
     outer_steps: int = 200
     inner_steps: int = 5
     lr_exploited: float = 2e-2  # step size for the exploited (committed / outer) player [gradient]
     lr_exploiter: float = 5e-2  # step size for the exploiter (fast / inner) player [gradient]
-    # CEM hyperparameters (used only when optimizer == "cem"):
+    # CEM / MPPI hyperparameters (used only when optimizer in {"cem", "mppi"}):
     cem_population: int = 64      # candidates sampled per step
-    cem_elite_frac: float = 0.125  # fraction kept as elites
-    cem_noise: float = 0.1        # std of the Gaussian sampled around the current embedding
-    cem_step_size: float = 1.0    # interpolation toward the elite mean (1.0 = jump fully)
+    cem_elite_frac: float = 0.125  # fraction kept as elites [cem only]
+    # sampling std of the Gaussian around the current embedding, per role (shared by cem/mppi):
+    cem_noise_exploited: float = 0.1  # for the exploited (committed / outer) player
+    cem_noise_exploiter: float = 0.1  # for the exploiter (fast / inner) player
+    cem_step_size: float = 1.0    # interpolation toward the (weighted) mean (1.0 = jump fully)
+    mppi_temperature: float = 1.0  # softmax temperature for MPPI weighting (low -> argmax-like)
     num_restarts: int = 4
     bound_embeddings: bool = True
     # Mahalanobis trust region: after each descent-ascent step, project each embedding back
@@ -239,6 +244,9 @@ class TaskFConfig:
     # part of the key, so a fresh NeuPL draw from the same checkpoint still hits the cache.
     # Skips ground-truth payoff computation + model training on a hit. None disables caching.
     value_function_cache_dir: Optional[str] = None
+    # if True, ignore any existing cached value function (always retrain from scratch); the
+    # freshly trained model is still saved to the cache dir afterward (refreshing it).
+    value_function_cache_ignore: bool = False
     # exploitability landscape: after each solve, plot P1's true exploitability over a 2D
     # slice of embedding space. Expensive (grid_size**2 decode + best-response evals), so
     # off by default. dim_selection is "path" (dims the P1 path varied most) or "random".
@@ -273,14 +281,15 @@ class TaskFConfig:
             raise ValueError(f"trust_region_scale must be positive, got {self.trust_region_scale}")
         if self.optimizing_player not in ("p1", "p2"):
             raise ValueError(f"optimizing_player must be 'p1' or 'p2', got {self.optimizing_player!r}")
-        if self.optimizer not in ("gradient", "cem"):
-            raise ValueError(f"optimizer must be 'gradient' or 'cem', got {self.optimizer!r}")
+        if self.optimizer not in ("gradient", "cem", "mppi"):
+            raise ValueError(f"optimizer must be 'gradient', 'cem', or 'mppi', got {self.optimizer!r}")
         if self.cem_population < 2:
             raise ValueError(f"cem_population must be >= 2, got {self.cem_population}")
         if not 0 < self.cem_elite_frac <= 1:
             raise ValueError(f"cem_elite_frac must be in (0, 1], got {self.cem_elite_frac}")
-        if self.cem_noise <= 0:
-            raise ValueError(f"cem_noise must be positive, got {self.cem_noise}")
+        for name in ("cem_noise_exploited", "cem_noise_exploiter", "mppi_temperature"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive, got {getattr(self, name)}")
         if not 0 < self.cem_step_size <= 1:
             raise ValueError(f"cem_step_size must be in (0, 1], got {self.cem_step_size}")
 
