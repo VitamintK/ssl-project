@@ -14,6 +14,7 @@ Benefits:
 - All tasks register results
 """
 
+import os
 import numpy as np
 import logging
 from typing import List
@@ -29,6 +30,7 @@ from downstream import (
     EmbeddingEquilibriumSolver,
     compute_best_response_value,
     compute_nash_conv,
+    matrix_game_baseline,
     plot_solve_value_curves,
     plot_task_f_combined,
 )
@@ -661,9 +663,32 @@ def run_task_f(
             ),
         )
 
+    # Restricted-matrix-game baseline (computed before the solve): over the sampled pool, pick
+    # the committed-player policy the value function deems least exploitable, then report its
+    # exact ground-truth BRV -- the bar the ascent-descent solve needs to beat.
+    try:
+        matrix_baseline = matrix_game_baseline(
+            game, predictor.trainer.model, p1_policies, p2_policies, pool_p1, pool_p2,
+            committed_player_id=committed_player_id, device=device)
+        logger.info(
+            "Task F matrix-game baseline (committed=%s): pool policy #%d is least exploitable "
+            "by the value function (predicted BR value=%.6f); its exact ground-truth BRV=%.6f",
+            matrix_baseline["committed_player"], matrix_baseline["selected_pool_index"],
+            matrix_baseline["predicted_exploitability"], matrix_baseline["ground_truth_brv"])
+    except Exception as exc:  # best-effort; never fail the task on the baseline
+        logger.warning(f"Could not compute Task F matrix-game baseline: {exc}")
+        matrix_baseline = None
+
     # 2. Solve for an equilibrium, keeping the restart with lowest decoded NashConv.
     solver = EmbeddingEquilibriumSolver(
         game, predictor.trainer.model, pool_p1, pool_p2, p1_decoder, p2_decoder, config, device=device)
+
+    # Live web viewer: stream each solve step's projected embeddings to figures/task_f/live/.
+    if getattr(config, "live_view", False):
+        live_dir = os.path.join("figures", "task_f", "live")
+        solver.setup_live(live_dir, originals_p1=p1_original_embeddings,
+                          originals_p2=p2_original_embeddings)
+        logger.info(f"Live viewer streaming to {live_dir}/ (run: uv run python3 serve_live.py)")
 
     def score(res):
         return compute_nash_conv(game, p1_decoder(res.e_p1), p2_decoder(res.e_p2))
@@ -699,12 +724,64 @@ def run_task_f(
         out_dir = _Path("figures") / "task_f"
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        # Detect whether the source checkpoint is an APSRO run (its config.json carries an
+        # 'apsro' flag, written during NeuPL/APSRO training). None = couldn't determine.
+        _ckpt_apsro = None
+        _ckpt_meta = {}
+        if checkpoint_id:
+            _ckpt_cfg = _Path(str(checkpoint_id)) / "config.json"
+            if _ckpt_cfg.exists():
+                try:
+                    with open(_ckpt_cfg) as _cf:
+                        _ckpt_meta = _json.load(_cf)
+                    _ckpt_apsro = bool(_ckpt_meta.get("apsro", False))
+                except Exception:
+                    pass
+        _ckpt_info = {
+            "id": str(checkpoint_id) if checkpoint_id else None,
+            "apsro": _ckpt_apsro,
+            "apsro_exploited_player": _ckpt_meta.get("exploited_player"),
+            "apsro_bandit": _ckpt_meta.get("bandit"),
+        }
+
+        # Serialize the full Task F config (nested dataclasses -> dicts) alongside the stats.
+        import dataclasses as _dataclasses
+        _config_dict = (_dataclasses.asdict(config)
+                        if _dataclasses.is_dataclass(config) else vars(config))
         solve_stats_path = str(out_dir / f"{safe_label}_solve_stats.json")
         with open(solve_stats_path, "w") as _f:
-            _json.dump({"label": label, "restarts": solver.last_restart_stats}, _f,
+            _json.dump({"label": label, "checkpoint": _ckpt_info, "config": _config_dict,
+                        "matrix_game_baseline": matrix_baseline,
+                        "restarts": solver.last_restart_stats}, _f,
                        indent=2, default=float)
         logger.info(f"Saved solve stats to {solve_stats_path}")
         _archive_plot(solve_stats_path, run_ts)
+
+        # One-line summary of the optimization scheme, shown under the figure title.
+        _sum_parts = [
+            f"optimizer={config.optimizer}",
+            f"lr(exploited/exploiter)={config.lr_exploited:g}/{config.lr_exploiter:g}",
+        ]
+        if config.optimizer in ("cem", "mppi"):
+            _sum_parts.append(
+                f"noise(exploited/exploiter)={config.cem_noise_exploited:g}/{config.cem_noise_exploiter:g}")
+        if config.optimizer == "mppi":
+            _sum_parts.append(f"mppi_temp={config.mppi_temperature:g}")
+        _sum_parts.append(
+            f"trust_region=on (q={config.trust_region_quantile:g}, scale={config.trust_region_scale:g})"
+            if config.trust_region else "trust_region=off")
+        _sum_parts.append(
+            f"posttrain=on (lr={config.posttrain_lr:g}, anchor={config.posttrain_anchor_batch})"
+            if config.posttrain else "posttrain=off")
+        if _ckpt_apsro:
+            _sum_parts.append(
+                f"checkpoint=APSRO(exploited={_ckpt_meta.get('exploited_player')},"
+                f"bandit={_ckpt_meta.get('bandit')})")
+        elif _ckpt_apsro is False:
+            _sum_parts.append("checkpoint=non-APSRO")
+        else:
+            _sum_parts.append("checkpoint=unknown")
+        _config_summary = " | ".join(_sum_parts)
 
         # The committed (optimizing) player is whose exploitability is plotted.
         _cid = 0 if config.optimizing_player == "p1" else 1
@@ -722,13 +799,16 @@ def run_task_f(
                 grid_size=config.landscape_grid_size,
                 committed_player_id=_cid, committed_pool=_cpool,
                 committed_originals=_corig, landscape_vmax=_vmax,
-                title=f"Task F — {label}")
+                title=f"Task F — {label}", subtitle=_config_summary,
+                # committed (outer) player uses the "exploited" sampling noise; only CEM/MPPI sample.
+                sample_noise=(config.cem_noise_exploited
+                              if config.optimizer in ("cem", "mppi") else None))
         else:
             plot_path = str(out_dir / f"{safe_label}_solve_curves.png")
             plot_solve_value_curves(
                 solver.last_restart_stats, plot_path,
                 title=f"Task F value curves — {label}",
-                committed_player_id=_cid)
+                committed_player_id=_cid, subtitle=_config_summary)
         logger.info(f"Saved Task F figure to {plot_path}")
         _archive_plot(plot_path, run_ts)
     except Exception as exc:  # plotting/dumping is best-effort; never fail the task on it
@@ -755,6 +835,7 @@ def run_task_f(
         "nashconv_baseline": nashconv_baseline,
         "value_at_star": float(result.value),
         "sampled_payoff_at_star": float(sampled_payoff),
+        "matrix_game_baseline": matrix_baseline,
         "val_metrics": val_metrics,
         "config": config_to_dict(config),
         "posttrain": bool(config.posttrain),

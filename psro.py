@@ -79,18 +79,12 @@ def best_response_value(game, fixed_policy, fixed_player, br_player):
     ``fixed_policy`` plays ``fixed_player``; only its states matter. Requires
     ``fixed_policy.action_probabilities(state)`` (OpenSpiel Policy interface).
     """
-    from open_spiel.python import policy as policy_lib
     from open_spiel.python.algorithms import best_response as _best_response
+    from utils import tabularize_policy
 
-    profile = policy_lib.TabularPolicy(game)  # opponent (br_player) rows are ignored
-    for state in profile.states:
-        if state.current_player() != fixed_player:
-            continue
-        probs = fixed_policy.action_probabilities(state)
-        row = profile.action_probability_array[profile.state_index(state)]
-        row[:] = 0.0
-        for action, p in probs.items():
-            row[action] = p
+    # Only fixed_player's rows matter (br_player is an exact best response); tabularize_policy
+    # fills them in one batched NN forward. Opponent rows stay default (ignored).
+    profile = tabularize_policy(game, fixed_policy, fixed_player)
     responder = _best_response.BestResponsePolicy(game, br_player, profile)
     return float(responder.value(game.new_initial_state()))
 
@@ -132,7 +126,14 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
     from iig_rl_benchmark.algorithms.psro import rl_policy, rl_oracle
 
     game = pyspiel.load_game(game_name)
-    config_path = 'configs/neupl.yaml'
+    # Kuhn APSRO uses its own hyperparameters (configs/neupl_apsro.yaml); everything else
+    # (symmetric neupl_v2, and APSRO on other games) falls back to the shared neupl.yaml.
+    if apsro and game_name == 'kuhn_poker':
+        config_path = 'configs/neupl_apsro.yaml'
+    elif game_name == 'leduc_poker':
+        config_path = 'configs/neupl_leduc.yaml'
+    else:
+        config_path = 'configs/neupl.yaml'
     algorithm_config = OmegaConf.load(config_path)
     args = OmegaConf.load('configs/experiment.yaml')
     args.algorithm = algorithm_config
@@ -717,7 +718,7 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
             """Train E's policies 1..k against their bandit mixture over X's {0..i-1}."""
             _sampled = []
             for _ in range(num_pols_sampled):
-                i = min(random.randint(1, k + 1), N - 1)
+                i = random.randint(1, k)  # k is the top unlocked index (randint is inclusive)
                 _sampled.append(i)
                 training_pol = agents[E][i]
                 training_pol.unfreeze()
@@ -740,7 +741,7 @@ def run_neupl_v2(game_name: str = 'kuhn_poker', use_randall_loss: bool = False, 
             """Train X's policies 0..k as a pure best response to E's same-index policy."""
             _sampled = []
             for _ in range(num_pols_sampled):
-                i = min(random.randint(0, k + 1), N - 1)
+                i = random.randint(0, k)  # k is the top unlocked index (randint is inclusive)
                 _sampled.append(i)
                 training_pol = agents[X][i]
                 training_pol.unfreeze()

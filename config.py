@@ -238,6 +238,9 @@ class TaskFConfig:
     # for the solve-curve plots. Expensive (decode + NashConv per inner step), so
     # off by default; enable only for diagnostic runs.
     log_real_values: bool = False
+    # if True, stream each solve step's projected embeddings to figures/task_f/live/ for the
+    # live web viewer (serve_live.py). Off by default; enable with the --f-live CLI flag.
+    live_view: bool = False
     # value-function caching: if set, the trained value function is saved to / loaded from
     # this directory, keyed by experiment label (which identifies the checkpoint) plus a
     # config + embedding-dimensionality fingerprint. The sampled embedding *values* are not

@@ -13,6 +13,7 @@ Uses composition pattern for clean separation of ML and domain logic.
 
 from abc import ABC, abstractmethod
 import copy
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -488,10 +489,24 @@ class PayoffPredictor:
               f"({n_p1} x {n_p2}) agent pairs...")
         payoffs = []
         self.pair_indices = []
-        for p1_idx, p2_idx in tqdm(pairs, desc="Agent pairs"):
-            payoff = get_expected_payoffs(self.game, self.p1_policies[p1_idx], self.p2_policies[p2_idx], exact=exact)
-            payoffs.append(payoff)
-            self.pair_indices.append((p1_idx, p2_idx))
+        if exact:
+            # Tabularize each distinct policy ONCE (one batched NN forward each), then get the
+            # exact value of every pair from the sequence-form reach decomposition -- a single
+            # matrix multiply over precomputed per-policy reach vectors, with no per-pair tree
+            # traversal. Both steps avoid recomputing shared work across pairs.
+            from utils import tabularize_policy, grid_payoffs_via_reach
+            tab_p1 = {i: tabularize_policy(self.game, self.p1_policies[i], 0)
+                      for i in tqdm(sorted({p1 for p1, _ in pairs}), desc="Tabularizing P1")}
+            tab_p2 = {j: tabularize_policy(self.game, self.p2_policies[j], 1)
+                      for j in tqdm(sorted({p2 for _, p2 in pairs}), desc="Tabularizing P2")}
+            payoffs = grid_payoffs_via_reach(self.game, tab_p1, tab_p2, pairs)
+            self.pair_indices = list(pairs)
+        else:
+            for p1_idx, p2_idx in tqdm(pairs, desc="Agent pairs"):
+                payoff = get_expected_payoffs(
+                    self.game, self.p1_policies[p1_idx], self.p2_policies[p2_idx], exact=False)
+                payoffs.append(payoff)
+                self.pair_indices.append((p1_idx, p2_idx))
 
         self.ground_truth_payoffs = np.array(payoffs)
         return self.ground_truth_payoffs
@@ -1442,18 +1457,18 @@ def continue_train_value_model(model, X, y, epochs, lr, device="cpu"):
 
 def compute_nash_conv(game, p1_policy, p2_policy) -> float:
     """NashConv of the joint profile (p1_policy plays player 0, p2_policy plays player 1)."""
-    from open_spiel.python import policy as policy_lib
     from open_spiel.python.algorithms import exploitability as _exploitability
+    from utils import tabularize_policy
 
-    joint = policy_lib.TabularPolicy(game)
+    # Tabularize each player in one batched NN forward, then assemble the joint profile:
+    # use p1's tabular (correct player-0 rows) as the base and overwrite the player-1 rows
+    # with p2's. The row copy is cheap Python; the NN work already happened in the batch.
+    joint = tabularize_policy(game, p1_policy, 0)
+    t1 = tabularize_policy(game, p2_policy, 1)
     for state in joint.states:
-        pid = state.current_player()
-        src = p1_policy if pid == 0 else p2_policy
-        probs = src.action_probabilities(state)
-        row = joint.action_probability_array[joint.state_index(state)]
-        row[:] = 0.0
-        for action, p in probs.items():
-            row[action] = p
+        if state.current_player() == 1:
+            idx = joint.state_index(state)
+            joint.action_probability_array[idx] = t1.action_probability_array[idx]
     return float(_exploitability.nash_conv(game, joint))
 
 
@@ -1467,22 +1482,69 @@ def compute_best_response_value(game, committed_policy, committed_player_id=0) -
     the joint profile. This depends only on ``committed_policy`` (the fast player's actual
     strategy is irrelevant, since the opponent is replaced by an exact best response).
     """
-    from open_spiel.python import policy as policy_lib
     from open_spiel.python.algorithms import best_response as _best_response
+    from utils import tabularize_policy
 
-    # Opponent states default to uniform in the profile and are ignored: the best
-    # responder overrides them. Only the committed player's states matter.
-    profile = policy_lib.TabularPolicy(game)
-    for state in profile.states:
-        if state.current_player() != committed_player_id:
-            continue
-        probs = committed_policy.action_probabilities(state)
-        row = profile.action_probability_array[profile.state_index(state)]
-        row[:] = 0.0
-        for action, p in probs.items():
-            row[action] = p
+    # Only the committed player's states matter (the opponent is an exact best response, so
+    # its rows are ignored). tabularize_policy fills those rows in one batched NN forward.
+    profile = tabularize_policy(game, committed_policy, committed_player_id)
     responder = _best_response.BestResponsePolicy(game, 1 - committed_player_id, profile)
     return float(responder.value(game.new_initial_state()))
+
+
+def matrix_game_baseline(game, value_model, p1_policies, p2_policies, pool_p1, pool_p2,
+                         committed_player_id=0, device="cpu"):
+    """Restricted-matrix-game baseline for Task F.
+
+    Builds the payoff matrix over the *sampled* pool policies, with entries predicted by the
+    trained value function ``V(e1, e2)`` (the payoff to P1; P1 maximizes, P2 minimizes -- the
+    solver's convention). Restricting the exploiter to the sampled opponent pool, the least
+    exploitable committed-player policy is the pool row/column whose best-responding opponent
+    scores lowest *according to the value function*. We then return the **exact** ground-truth
+    best-response value (BRV) of that selected policy -- i.e. how exploitable the value
+    function's pick actually is.
+
+    Args:
+        value_model: the trained torch value model (``predictor.trainer.model``).
+        p1_policies, p2_policies: the sampled pool policies (index-aligned with the pools).
+        pool_p1, pool_p2: the sampled pool embeddings, (n1, d1) / (n2, d2).
+        committed_player_id: 0 (P1) or 1 (P2) -- the exploited player we pick a policy for.
+
+    Returns:
+        dict with the selected pool index, the value-function's predicted exploitability of
+        that pick, and its exact ground-truth BRV.
+    """
+    e1 = torch.as_tensor(np.asarray(pool_p1), dtype=torch.float32, device=device)  # (n1, d1)
+    e2 = torch.as_tensor(np.asarray(pool_p2), dtype=torch.float32, device=device)  # (n2, d2)
+    n1, n2 = e1.shape[0], e2.shape[0]
+    # All (P1, P2) pairs, P1-major, in the model's [e1, e2] concatenation order.
+    E1 = e1.unsqueeze(1).expand(n1, n2, -1).reshape(n1 * n2, -1)
+    E2 = e2.unsqueeze(0).expand(n1, n2, -1).reshape(n1 * n2, -1)
+    with torch.no_grad():
+        V = value_model(torch.cat([E1, E2], dim=1)).detach().cpu().numpy().reshape(n1, n2)
+    # V[i, j] = predicted payoff to P1. In a zero-sum game the opponent's payoff is its
+    # negation, so each player's best-responding-opponent value (lower = less exploitable):
+    if committed_player_id == 0:
+        # Committed = P1 (maximizer). Exploiter = P2 minimizes V, i.e. best-responds by the
+        # column giving P1 its worst payoff; P2's value there is -min_j V[i, j].
+        predicted_exploitability = -V.min(axis=1)      # (n1,), P2's predicted BR value per P1
+        committed_policies = p1_policies
+    else:
+        # Committed = P2 (minimizer). Exploiter = P1 maximizes V; P1's BR value vs P2 policy j
+        # is max_i V[i, j].
+        predicted_exploitability = V.max(axis=0)       # (n2,), P1's predicted BR value per P2
+        committed_policies = p2_policies
+    selected_index = int(np.argmin(predicted_exploitability))
+    ground_truth_brv = compute_best_response_value(
+        game, committed_policies[selected_index], committed_player_id=committed_player_id)
+    return {
+        "committed_player": "p1" if committed_player_id == 0 else "p2",
+        "matrix_shape": [n1, n2],
+        "selected_pool_index": selected_index,
+        "predicted_exploitability": float(predicted_exploitability[selected_index]),
+        "ground_truth_brv": float(ground_truth_brv),
+        "predicted_exploitability_all": predicted_exploitability.astype(float).tolist(),
+    }
 
 
 @dataclass
@@ -1517,6 +1579,8 @@ class EmbeddingEquilibriumSolver:
         self.hi1 = torch.tensor(self.pool_p1.max(0), device=device)
         self.lo2 = torch.tensor(self.pool_p2.min(0), device=device)
         self.hi2 = torch.tensor(self.pool_p2.max(0), device=device)
+        self._live = None   # set by setup_live(): {'fh', 'step'} for the live web viewer
+        self._proj = None   # per-player (mu, pca_basis, random_basis) for 2D projection
 
         # Mahalanobis trust region: keep the search inside the shell the pool occupies,
         # so the value function is never evaluated far out of its training distribution.
@@ -1525,6 +1589,83 @@ class EmbeddingEquilibriumSolver:
             scale = getattr(self.config, "trust_region_scale", 1.0)
             self.mu1, self.prec1, self.r1 = self._mahalanobis_params(self.pool_p1, q, scale, device)
             self.mu2, self.prec2, self.r2 = self._mahalanobis_params(self.pool_p2, q, scale, device)
+
+    @staticmethod
+    def _fit_2d_projections(pool, seed):
+        """Return (mu, pca_basis, random_basis) mapping d-dim embeddings to 2D.
+
+        ``pca_basis`` is the pool's top-2 principal axes; ``random_basis`` is a fixed
+        seeded orthonormal 2D basis. Both are (d, 2), so a point projects as (x - mu) @ B.
+        """
+        pool = np.asarray(pool, np.float32)
+        mu = pool.mean(0).astype(np.float32)
+        X = pool - mu
+        d = X.shape[1]
+        if d >= 2 and X.shape[0] >= 2:
+            _, _, Vt = np.linalg.svd(X, full_matrices=False)
+            pca_B = Vt[:2].T.astype(np.float32)
+        else:
+            pca_B = np.eye(d, 2, dtype=np.float32)
+        rng = np.random.default_rng(seed)
+        q, _ = np.linalg.qr(rng.standard_normal((d, 2)).astype(np.float32))
+        return mu, pca_B, q[:, :2].astype(np.float32)
+
+    def setup_live(self, live_dir, originals_p1=None, originals_p2=None):
+        """Enable per-step streaming to ``live_dir`` for the live web viewer.
+
+        Writes a static ``meta.json`` (pool + original-policy embeddings projected under a
+        fixed PCA basis and a fixed seeded-random 2D basis, per player) and truncates
+        ``steps.jsonl``; each subsequent solve step appends one projected record.
+        """
+        import os
+        os.makedirs(live_dir, exist_ok=True)
+        seed = int(getattr(self.config, "seed", 0) or 0)
+        self._proj = {"p1": self._fit_2d_projections(self.pool_p1, seed + 1),
+                      "p2": self._fit_2d_projections(self.pool_p2, seed + 2)}
+
+        def _proj_points(pts, player):
+            if pts is None:
+                return None
+            mu, pca_B, rand_B = self._proj[player]
+            rel = np.asarray(pts, np.float32) - mu
+            return {"pca": (rel @ pca_B).tolist(), "random": (rel @ rand_B).tolist()}
+
+        meta = {
+            "log_real_values": bool(getattr(self.config, "log_real_values", False)),
+            "optimizer": getattr(self.config, "optimizer", "gradient"),
+            "num_restarts": int(getattr(self.config, "num_restarts", 1)),
+            "players": {
+                "p1": {"pool": _proj_points(self.pool_p1, "p1"),
+                       "originals": _proj_points(originals_p1, "p1")},
+                "p2": {"pool": _proj_points(self.pool_p2, "p2"),
+                       "originals": _proj_points(originals_p2, "p2")},
+            },
+        }
+        with open(os.path.join(live_dir, "meta.json"), "w") as f:
+            json.dump(meta, f)
+        self._live = {"fh": open(os.path.join(live_dir, "steps.jsonl"), "w"), "step": 0}
+
+    def _live_record(self, restart, outer, inner, e1, e2, stat):
+        """Append one projected per-step record to the live viewer's steps.jsonl."""
+        e1n, e2n = e1.detach().cpu().numpy(), e2.detach().cpu().numpy()
+        mu1, pca1, rnd1 = self._proj["p1"]
+        mu2, pca2, rnd2 = self._proj["p2"]
+        rec = {
+            "restart": int(restart), "outer": int(outer), "inner": int(inner),
+            "step": self._live["step"],
+            "p1": {"pca": ((e1n - mu1) @ pca1).tolist(), "random": ((e1n - mu1) @ rnd1).tolist()},
+            "p2": {"pca": ((e2n - mu2) @ pca2).tolist(), "random": ((e2n - mu2) @ rnd2).tolist()},
+            "v": float(stat.get("v", 0.0)),
+            "dist_p1": float(stat.get("dist_p1_to_pool", 0.0)),
+            "dist_p2": float(stat.get("dist_p2_to_pool", 0.0)),
+        }
+        if "real_exploitability" in stat:
+            rec["brv"] = float(stat["real_exploitability"])
+        if "real_v" in stat:
+            rec["real_v"] = float(stat["real_v"])
+        self._live["fh"].write(json.dumps(rec) + "\n")
+        self._live["fh"].flush()
+        self._live["step"] += 1
 
     @staticmethod
     def _mahalanobis_params(pool, quantile, scale, device):
@@ -1688,7 +1829,8 @@ class EmbeddingEquilibriumSolver:
         v = self._value(e1, e2)
         return self._ascend_p1(v, e1, lr) if which == 1 else self._descend_p2(v, e2, lr)
 
-    def solve(self, init_p1=None, init_p2=None, X_pre=None, y_pre=None, exact=False) -> SolveResult:
+    def solve(self, init_p1=None, init_p2=None, X_pre=None, y_pre=None, exact=False,
+              restart_idx=0) -> SolveResult:
         cfg = self.config
         rng = np.random
         if init_p1 is None:
@@ -1754,6 +1896,8 @@ class EmbeddingEquilibriumSolver:
                     stat['real_v'] = float(real_v)
                     stat['real_exploitability'] = float(real_exploitability)
                 stats.append(stat)
+                if self._live is not None:  # stream this point to the live web viewer
+                    self._live_record(restart_idx, outer_step, inner_step, e1, e2, stat)
                 # inner update: the fast (non-committed / exploiter) player
                 if committed_id == 0:
                     e2 = self._player_step(e1, e2, which=2, lr=lr_in, noise=noise_in)   # inner = P2
@@ -1801,10 +1945,10 @@ class EmbeddingEquilibriumSolver:
         best, best_score = None, float("inf")
         self.last_restart_stats = []
         self.last_restart_results = []
-        for _ in range(self.config.num_restarts):
+        for ri in range(self.config.num_restarts):
             if pretrained_state is not None:  # reset so each restart is independent
                 self.model.load_state_dict(pretrained_state)
-            res = self.solve(X_pre=X_pre, y_pre=y_pre, exact=exact)
+            res = self.solve(X_pre=X_pre, y_pre=y_pre, exact=exact, restart_idx=ri)
             self.last_restart_stats.append(res.stats)
             self.last_restart_results.append(res)
             s = score_fn(res)
@@ -1918,8 +2062,25 @@ def _render_distances_on_ax(ax, stats, title=None):
     ax.grid(True, alpha=0.3)
 
 
+def _wrap_on_pipes(text, max_chars):
+    """Greedily wrap a ' | '-joined summary onto lines of at most ~max_chars characters."""
+    if not text:
+        return text
+    lines, cur = [], ""
+    for part in text.split(" | "):
+        cand = part if not cur else cur + " | " + part
+        if cur and len(cand) > max_chars:
+            lines.append(cur)
+            cur = part
+        else:
+            cur = cand
+    if cur:
+        lines.append(cur)
+    return "\n".join(lines)
+
+
 def plot_solve_value_curves(
-    restart_stats, save_path, title=None, committed_player_id=0,
+    restart_stats, save_path, title=None, committed_player_id=0, subtitle=None,
 ):
     """Plot the value trajectory of each solve run, one subplot per restart.
 
@@ -1954,12 +2115,13 @@ def plot_solve_value_curves(
     # hide any unused axes in the grid
     for k in range(n, nrows * ncols):
         axes[k // ncols][k % ncols].axis("off")
-    if title:
-        fig.suptitle(title)
+    if title or subtitle:
+        sub = _wrap_on_pipes(subtitle, max_chars=max(30, int(6 * ncols * 11)))
+        fig.suptitle("\n".join(t for t in (title, sub) if t), fontsize=10)
     fig.tight_layout()
 
     _Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, dpi=120)
+    fig.savefig(save_path, dpi=240)
     plt.close(fig)
     return save_path
 
@@ -2257,7 +2419,7 @@ def plot_task_f_combined(
     restart_stats, restart_results, game, committed_decoder, save_path,
     dim_selection="path", grid_size=25, margin_frac=0.5,
     committed_player_id=0, seed=0, title=None, committed_pool=None, landscape_vmax=None,
-    committed_originals=None,
+    committed_originals=None, subtitle=None, sample_noise=None,
 ):
     """One figure, one row per restart: [curves (stacked) | committed landscape | other path].
 
@@ -2361,6 +2523,22 @@ def plot_task_f_combined(
                     ax_ov.plot(pa, pb, color=col, lw=2, alpha=0.9, label=f"restart {k}")
                     ax_ov.scatter([pa[-1]], [pb[-1]], color=col, marker="*", s=60,
                                   edgecolor="black", zorder=7)
+                    # CEM/MPPI sample scale: an isotropic Gaussian of std ``sample_noise``
+                    # projects onto these orthonormal axes as a true circle, so drawing a
+                    # 1-sigma (and faint 2-sigma) circle at each run's start point shows the
+                    # sampling cloud's size against the (anisotropic) pool spread. Requires
+                    # equal aspect below so the circle isn't distorted into an ellipse.
+                    if sample_noise:
+                        from matplotlib.patches import Circle as _Circle
+                        ax_ov.add_patch(_Circle(
+                            (pa[0], pb[0]), sample_noise, fill=False, ls="--", lw=1.2,
+                            edgecolor=col, alpha=0.7, zorder=6,
+                            label=(f"sample 1σ (noise={sample_noise:g})" if k == 0 else None)))
+                        ax_ov.add_patch(_Circle(
+                            (pa[0], pb[0]), 2 * sample_noise, fill=False, ls=":", lw=1.0,
+                            edgecolor=col, alpha=0.35, zorder=6))
+                if sample_noise:  # keep the sample circles round (axes are in embedding units)
+                    ax_ov.set_aspect("equal", adjustable="datalim")
                 ax_ov.legend(fontsize=6, loc="best")
                 ax_ov.set_title(ttl)
 
@@ -2395,10 +2573,12 @@ def plot_task_f_combined(
             ax_o.legend(fontsize=7, loc="best")
             ax_o.set_title(f"restart {k}: {oname} path")
 
-    if title:
-        fig.suptitle(title)
+    if title or subtitle:
+        # Main title with the run's optimization config wrapped on smaller line(s) below.
+        sub = _wrap_on_pipes(subtitle, max_chars=max(40, int(6.5 * ncols * 10)))
+        fig.suptitle("\n".join(t for t in (title, sub) if t), fontsize=12)
 
     _Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, dpi=120)
+    fig.savefig(save_path, dpi=240)
     plt.close(fig)
     return save_path

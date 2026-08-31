@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Task F live viewer</title>
+<style>
+  :root {
+    --bg: #14171c; --panel: #1c2027; --ink: #e6e9ef; --muted: #8b94a3;
+    --grid: #2a2f38; --pool: #565f6e; --orig: #d7dae0;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.4 -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+  header { padding: 10px 16px; border-bottom: 1px solid var(--grid);
+           display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .02em; }
+  #status { color: var(--muted); font-variant-numeric: tabular-nums; }
+  #status b { color: var(--ink); font-weight: 600; }
+  #conn { margin-left: auto; font-size: 12px; }
+  #conn.ok { color: #5fd08a; } #conn.wait { color: var(--muted); } #conn.err { color: #e77; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 12px 16px; }
+  .card { background: var(--panel); border: 1px solid var(--grid); border-radius: 8px;
+          padding: 8px 8px 4px; }
+  .card h2 { font-size: 12px; margin: 0 0 6px; color: var(--muted); font-weight: 600;
+             text-transform: uppercase; letter-spacing: .04em; }
+  canvas { width: 100%; height: auto; display: block; }
+  .wide { grid-column: 1 / -1; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; padding: 0 16px 16px; color: var(--muted);
+            font-size: 12px; align-items: center; }
+  .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px;
+            vertical-align: -2px; margin-right: 5px; }
+  .note { padding: 0 16px 20px; color: var(--muted); font-size: 12px; max-width: 900px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Task&nbsp;F — live solve</h1>
+  <div id="status">waiting for data…</div>
+  <div id="conn" class="wait">● connecting</div>
+</header>
+
+<div class="grid">
+  <div class="card"><h2>P1 — PCA (top-2 pool variance)</h2><canvas id="p1_pca"></canvas></div>
+  <div class="card"><h2>P2 — PCA (top-2 pool variance)</h2><canvas id="p2_pca"></canvas></div>
+  <div class="card"><h2>P1 — random 2D</h2><canvas id="p1_random"></canvas></div>
+  <div class="card"><h2>P2 — random 2D</h2><canvas id="p2_random"></canvas></div>
+  <div class="card wide"><h2>value / exploitability vs step</h2><canvas id="chart"></canvas></div>
+</div>
+
+<div class="legend" id="legend">
+  <span><span class="swatch" style="background:var(--pool)"></span>sampled pool</span>
+  <span><span class="swatch" style="background:var(--orig)"></span>original policies (✕)</span>
+  <span id="restart_legend"></span>
+</div>
+
+<p class="note">
+  Paths are the P1/P2 embeddings projected to 2D (fixed per run). Each restart is a different
+  colour; the ◯ marks the current point. Panels use equal aspect, so an isotropic move looks
+  isotropic. Polls <code>figures/task_f/live/</code> every 500&nbsp;ms; a new run (which truncates
+  the file) resets the view automatically.
+</p>
+
+<script>
+const RESTART_COLORS = ["#4c9be8","#e8944c","#5fd08a","#c77dff","#e85c8a","#e8d44c","#4ce8d0","#b0b6c0"];
+const PANELS = [
+  {id:"p1_pca",    player:"p1", proj:"pca"},
+  {id:"p2_pca",    player:"p2", proj:"pca"},
+  {id:"p1_random", player:"p1", proj:"random"},
+  {id:"p2_random", player:"p2", proj:"random"},
+];
+const DPR = Math.max(1, window.devicePixelRatio || 1);
+
+let meta = null;
+let records = [];
+let lastLen = 0;       // byte length of steps.jsonl already parsed (detects truncation/new run)
+let metaKey = null;    // JSON string of meta, to detect a new run
+
+function sizeCanvas(cv, cssH) {
+  const w = cv.clientWidth || 400;
+  cv.width = Math.round(w * DPR);
+  cv.height = Math.round(cssH * DPR);
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  return {ctx, w, h: cssH};
+}
+
+// Fit a set of [x,y] points into [pad, w-pad]x[pad, h-pad] with EQUAL scale on both axes.
+function makeTransform(points, w, h, pad) {
+  let minx=Infinity, maxx=-Infinity, miny=Infinity, maxy=-Infinity;
+  for (const p of points) { if(!p) continue;
+    minx=Math.min(minx,p[0]); maxx=Math.max(maxx,p[0]);
+    miny=Math.min(miny,p[1]); maxy=Math.max(maxy,p[1]); }
+  if (!isFinite(minx)) { minx=-1;maxx=1;miny=-1;maxy=1; }
+  const cx=(minx+maxx)/2, cy=(miny+maxy)/2;
+  let span = Math.max(maxx-minx, maxy-miny) || 1;
+  span *= 1.12; // margin
+  const iw=w-2*pad, ih=h-2*pad, s=Math.min(iw,ih)/span;
+  return (p) => [pad + iw/2 + (p[0]-cx)*s, pad + ih/2 - (p[1]-cy)*s];
+}
+
+function drawPanel(panel) {
+  const cv = document.getElementById(panel.id);
+  const {ctx, w, h} = sizeCanvas(cv, 260);
+  ctx.clearRect(0,0,w,h);
+  if (!meta) return;
+  const pdata = meta.players[panel.player];
+  const pool = (pdata.pool && pdata.pool[panel.proj]) || [];
+  const orig = (pdata.originals && pdata.originals[panel.proj]) || [];
+  const path = records.map(r => r[panel.player][panel.proj]);
+  const T = makeTransform(pool.concat(orig, path), w, h, 22);
+
+  // pool points
+  ctx.fillStyle = getComputedStyle(document.body).getPropertyValue("--pool");
+  for (const p of pool) { const q=T(p); ctx.beginPath(); ctx.arc(q[0],q[1],2.4,0,7); ctx.fill(); }
+  // original policies as ✕
+  ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue("--orig");
+  ctx.lineWidth = 1.4;
+  for (const p of orig) { const q=T(p); const r=4;
+    ctx.beginPath(); ctx.moveTo(q[0]-r,q[1]-r); ctx.lineTo(q[0]+r,q[1]+r);
+    ctx.moveTo(q[0]-r,q[1]+r); ctx.lineTo(q[0]+r,q[1]-r); ctx.stroke(); }
+  // path, segmented by restart
+  ctx.lineWidth = 1.8;
+  let prev=null, prevR=null;
+  for (let i=0;i<records.length;i++) {
+    const r=records[i], q=T(r[panel.player][panel.proj]);
+    if (prev && r.restart===prevR) {
+      ctx.strokeStyle = RESTART_COLORS[r.restart % RESTART_COLORS.length];
+      ctx.globalAlpha = 0.9;
+      ctx.beginPath(); ctx.moveTo(prev[0],prev[1]); ctx.lineTo(q[0],q[1]); ctx.stroke();
+    }
+    prev=q; prevR=r.restart;
+  }
+  ctx.globalAlpha = 1;
+  // current point highlighted
+  if (records.length) {
+    const r=records[records.length-1], q=T(r[panel.player][panel.proj]);
+    const col=RESTART_COLORS[r.restart % RESTART_COLORS.length];
+    ctx.fillStyle=col; ctx.beginPath(); ctx.arc(q[0],q[1],4.5,0,7); ctx.fill();
+    ctx.strokeStyle="#fff"; ctx.lineWidth=1.6; ctx.beginPath(); ctx.arc(q[0],q[1],7,0,7); ctx.stroke();
+  }
+}
+
+function drawChart() {
+  const cv = document.getElementById("chart");
+  const {ctx, w, h} = sizeCanvas(cv, 200);
+  ctx.clearRect(0,0,w,h);
+  if (records.length < 2) return;
+  const pad=34;
+  const xs = records.map((_,i)=>i);
+  const xmax = xs.length-1;
+  const X = i => pad + (w-2*pad) * (i/Math.max(xmax,1));
+  const axis = (arr) => { let lo=Math.min(...arr), hi=Math.max(...arr); if(lo===hi){lo-=1;hi+=1;} return {lo,hi}; };
+  // grid baseline
+  ctx.strokeStyle=getComputedStyle(document.body).getPropertyValue("--grid"); ctx.lineWidth=1;
+  ctx.strokeRect(pad,10,w-2*pad,h-pad-10);
+
+  function plot(key, color, side, ly) {
+    const has = records.some(r => key in r);
+    if (!has) return null;
+    const vals = records.map(r => (key in r ? r[key] : null));
+    const present = vals.filter(v=>v!==null);
+    const {lo,hi}=axis(present);
+    const Y = v => (h-pad) - (h-pad-10) * ((v-lo)/(hi-lo));
+    ctx.strokeStyle=color; ctx.lineWidth=1.8; ctx.beginPath();
+    let started=false;
+    for (let i=0;i<vals.length;i++){ if(vals[i]===null) continue;
+      const x=X(i), y=Y(vals[i]); if(!started){ctx.moveTo(x,y);started=true;} else ctx.lineTo(x,y); }
+    ctx.stroke();
+    // scale label (staggered by ``ly`` so multiple series don't overlap)
+    ctx.fillStyle=color; ctx.font="11px sans-serif";
+    const tx = side==="L" ? pad+4 : w-pad-4; ctx.textAlign = side==="L" ? "left":"right";
+    ctx.fillText(`${key} [${lo.toFixed(2)}, ${hi.toFixed(2)}]`, tx, ly);
+    return true;
+  }
+  plot("v", "#4c9be8", "L", 22);
+  plot("real_v", "#e8944c", "L", 38);
+  plot("brv", "#5fd08a", "R", 22);
+  ctx.fillStyle=getComputedStyle(document.body).getPropertyValue("--muted");
+  ctx.textAlign="right"; ctx.font="11px sans-serif";
+  ctx.fillText("step →", w-pad, h-6);
+}
+
+function redraw() {
+  for (const p of PANELS) drawPanel(p);
+  drawChart();
+  // status
+  const st=document.getElementById("status");
+  if (records.length) {
+    const r=records[records.length-1];
+    const brv = ("brv" in r) ? `  BRV <b>${r.brv.toFixed(4)}</b>` : "";
+    st.innerHTML = `restart <b>${r.restart}</b>  step <b>${r.step}</b>  `
+      + `v <b>${r.v.toFixed(4)}</b>${brv}  distP1 <b>${r.dist_p1.toFixed(3)}</b>  distP2 <b>${r.dist_p2.toFixed(3)}</b>`
+      + `  (${records.length} pts)`;
+  }
+  // restart legend
+  const seen=[...new Set(records.map(r=>r.restart))].sort((a,b)=>a-b);
+  document.getElementById("restart_legend").innerHTML = seen.map(k =>
+    `<span style="margin-right:12px"><span class="swatch" style="background:${RESTART_COLORS[k%RESTART_COLORS.length]}"></span>restart ${k}</span>`).join("");
+}
+
+async function poll() {
+  const conn=document.getElementById("conn");
+  try {
+    const bust = "?t=" + Date.now();
+    const m = await fetch("figures/task_f/live/meta.json"+bust, {cache:"no-store"});
+    if (m.ok) {
+      const txt = await m.text();
+      if (txt !== metaKey) { metaKey = txt; meta = JSON.parse(txt); records=[]; lastLen=0; }
+    }
+    const s = await fetch("figures/task_f/live/steps.jsonl"+bust, {cache:"no-store"});
+    if (s.ok) {
+      const txt = await s.text();
+      if (txt.length < lastLen) { records=[]; lastLen=0; }   // file truncated → new run
+      if (txt.length !== lastLen) {
+        lastLen = txt.length;
+        records = txt.trim() ? txt.trim().split("\n").map(l=>JSON.parse(l)) : [];
+      }
+      conn.className="ok"; conn.textContent = meta ? "● live" : "● waiting for run";
+    } else { conn.className="wait"; conn.textContent="● no data yet"; }
+    redraw();
+  } catch (e) {
+    conn.className="err"; conn.textContent="● "+e.message;
+  }
+}
+
+setInterval(poll, 500);
+poll();
+window.addEventListener("resize", redraw);
+</script>
+</body>
+</html>

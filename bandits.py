@@ -35,7 +35,7 @@ class AdversarialBandit(ABC):
 class Hedge(AdversarialBandit):
     """Exponential weights with importance-weighted (Exp3-style) bandit updates."""
 
-    def __init__(self, num_arms, reward_range=(-1.0, 1.0), eta=0.1, gamma=0.05, seed=None):
+    def __init__(self, num_arms, reward_range=(-1.0, 1.0), eta=0.032, gamma=0.06, seed=None):
         super().__init__(num_arms, reward_range, seed)
         self.eta = eta
         self.gamma = gamma if num_arms > 1 else 0.0

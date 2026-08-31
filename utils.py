@@ -105,6 +105,142 @@ def get_expected_payoffs_agent(game: pyspiel.Game, p0_ppo_agent: ppo.PPOAgent, p
         payoffs.append(payoff)
     return np.mean(payoffs)
 
+def _batched_action_probs(pol, states, player_id, game):
+    """Action-probability rows for ``states`` in one network forward pass.
+
+    Returns an (K, num_distinct_actions) array (row i = probabilities for states[i]) for the
+    NN-backed policy wrappers, or None for any other policy type (caller falls back to
+    per-state ``action_probabilities``). Exact same math as the per-state path -- the softmax
+    is deterministic given weights -- just evaluated as one batch.
+    """
+    if not isinstance(pol, (PPOAgentPolicy, PPONeuplAgentPolicy)):
+        return None
+    agent = pol._ppo_agent
+    device = next(agent.parameters()).device
+    num_actions = game.num_distinct_actions()
+    info = torch.tensor(np.array([s.information_state_tensor(player_id) for s in states]),
+                        dtype=torch.float32, device=device)
+    mask = torch.zeros((len(states), num_actions), device=device)
+    for i, s in enumerate(states):
+        mask[i, s.legal_actions(player_id)] = 1
+    with torch.no_grad():
+        if isinstance(pol, PPONeuplAgentPolicy):
+            _, _, _, probs = agent.get_action(info, embedding=pol._embedding, legal_actions_mask=mask)
+        else:
+            _, probs = agent.get_action(info, legal_actions_mask=mask)
+    return probs.detach().cpu().numpy()
+
+
+def tabularize_policy(game: pyspiel.Game, pol: policy.Policy, player_id: int) -> policy.TabularPolicy:
+    """Snapshot ``pol`` into an OpenSpiel TabularPolicy, filling only ``player_id``'s rows.
+
+    Only the rows for states where ``player_id`` acts are set (the others keep the default
+    uniform value and are never queried, since in a pair each tabular policy is only asked
+    about its own player's states). NN-backed policies are evaluated in a single batched
+    forward pass; other policies fall back to per-state ``action_probabilities``.
+    """
+    tab = policy.TabularPolicy(game)
+    states = [s for s in tab.states if s.current_player() == player_id]
+    if not states:
+        return tab
+    probs = _batched_action_probs(pol, states, player_id, game)
+    for i, s in enumerate(states):
+        row = tab.action_probability_array[tab.state_index(s)]
+        if probs is not None:
+            row[:] = probs[i]
+        else:  # fallback: query the policy one state at a time
+            row[:] = 0.0
+            for a, p in pol.action_probabilities(s, player_id).items():
+                row[a] = p
+    return tab
+
+
+_TERMINAL_CACHE = {}
+
+
+def _enumerate_terminals(game, ref_tab):
+    """Walk the tree once, independent of any policy.
+
+    Returns ``(weight, dec0, dec1, num_cells)`` where, over all T terminal histories:
+      - ``weight``: (T,) array of ``chance_reach(h) * return_to_player0(h)``,
+      - ``dec0`` / ``dec1``: (T, Lmax) int arrays of *flat* ``state_index * num_actions +
+        action`` indices for each player's decisions along the path, right-padded with a
+        sentinel (``num_cells``) that gathers to 1.0 so it doesn't affect the reach product,
+      - ``num_cells``: ``num_states * num_actions`` (the sentinel / flat-array length).
+
+    Cached per game so repeated PayoffPredictor calls in a run reuse the walk.
+    """
+    key = str(game)
+    if key in _TERMINAL_CACHE:
+        return _TERMINAL_CACHE[key]
+    A = game.num_distinct_actions()
+    num_cells = len(ref_tab.states) * A
+    weights, dec0, dec1 = [], [], []
+
+    def rec(state, chance, d0, d1):
+        if state.is_terminal():
+            weights.append(chance * state.returns()[0])
+            dec0.append(d0); dec1.append(d1)
+            return
+        if state.is_chance_node():
+            for a, p in state.chance_outcomes():
+                rec(state.child(a), chance * p, d0, d1)
+            return
+        cur = state.current_player()
+        base = ref_tab.state_index(state) * A
+        for a in state.legal_actions(cur):
+            flat = base + a
+            if cur == 0:
+                rec(state.child(a), chance, d0 + [flat], d1)
+            else:
+                rec(state.child(a), chance, d0, d1 + [flat])
+
+    rec(game.new_initial_state(), 1.0, [], [])
+
+    def _pad(dec):
+        L = max((len(d) for d in dec), default=0)
+        out = np.full((len(dec), L), num_cells, dtype=np.int64)  # sentinel -> 1.0
+        for i, d in enumerate(dec):
+            out[i, :len(d)] = d
+        return out
+
+    result = (np.asarray(weights, dtype=np.float64), _pad(dec0), _pad(dec1), num_cells)
+    _TERMINAL_CACHE[key] = result
+    return result
+
+
+def _reach_vectors(tab_by_index, indices, dec, num_cells):
+    """Reach probability of each terminal (rows of ``dec``) under each listed policy.
+
+    Returns an (len(indices), T) array: entry (k, h) = product of the policy's action
+    probabilities along terminal h's decisions for that player.
+    """
+    R = np.empty((len(indices), dec.shape[0]), dtype=np.float64)
+    for k, idx in enumerate(indices):
+        flat = np.append(tab_by_index[idx].action_probability_array.reshape(-1), 1.0)  # sentinel=1
+        R[k] = flat[dec].prod(axis=1)
+    return R
+
+
+def grid_payoffs_via_reach(game, tab_p1, tab_p2, pairs):
+    """Exact player-0 payoff for each ``(p1_idx, p2_idx)`` in ``pairs`` (list order preserved).
+
+    Uses the sequence-form decomposition V(i,j) = sum_h u0(h) c(h) r0^i(h) r1^j(h): one tree
+    walk (cached) plus one reach vector per distinct policy, then a single matrix multiply for
+    the whole grid -- no per-pair tree traversal. ``tab_p1``/``tab_p2`` map policy index to the
+    TabularPolicy from ``tabularize_policy`` (players 0 and 1 respectively).
+    """
+    ref_tab = policy.TabularPolicy(game)
+    weight, dec0, dec1, num_cells = _enumerate_terminals(game, ref_tab)
+    p1_idx = sorted(tab_p1); p2_idx = sorted(tab_p2)
+    R0 = _reach_vectors(tab_p1, p1_idx, dec0, num_cells)   # (n1, T)
+    R1 = _reach_vectors(tab_p2, p2_idx, dec1, num_cells)   # (n2, T)
+    M = (R0 * weight) @ R1.T                                # (n1, n2), exact P0 payoff grid
+    row1 = {i: r for r, i in enumerate(p1_idx)}
+    row2 = {j: r for r, j in enumerate(p2_idx)}
+    return [float(M[row1[i], row2[j]]) for i, j in pairs]
+
+
 def get_expected_payoffs(game: pyspiel.Game, p0_policy: policy.Policy, p1_policy: policy.Policy, exact=False) -> float:
     if exact:
         return _get_expected_payoffs_exact(game, p0_policy, p1_policy)

@@ -1137,19 +1137,19 @@ def _run_experiment(spec: dict) -> tuple:
                                 )
         config = TaskFConfig(
             value_function_model_config=model_cfg,
-            value_function_num_pairs=ov.get('num_pairs', 10000),
+            value_function_num_pairs=ov.get('num_pairs', 40000),
             optimizing_player=ov.get('optimizing_player', 'p1'),
             optimizer=ov.get('optimizer', 'cem'),
             cem_population=ov.get('cem_population', 64),
             cem_elite_frac=ov.get('cem_elite_frac', 0.125),
-            cem_noise_exploited=ov.get('cem_noise_exploited', ov.get('cem_noise', 0.1)),
-            cem_noise_exploiter=ov.get('cem_noise_exploiter', ov.get('cem_noise', 0.3)),
+            cem_noise_exploited=ov.get('cem_noise_exploited', ov.get('cem_noise', 0.05)),
+            cem_noise_exploiter=ov.get('cem_noise_exploiter', ov.get('cem_noise', 0.4)),
             cem_step_size=ov.get('cem_step_size', 1.0),
             mppi_temperature=ov.get('mppi_temperature', 1.0),
-            outer_steps=ov.get('outer_steps', 1600),
+            outer_steps=ov.get('outer_steps', 2100),
             inner_steps=ov.get('inner_steps', 4), # 9 
-            lr_exploited=ov.get('lr_exploited', 1e-2),
-            lr_exploiter=ov.get('lr_exploiter', 2.1e-2),
+            lr_exploited=ov.get('lr_exploited', 2.1e-2),
+            lr_exploiter=ov.get('lr_exploiter', 4.2e-2),
             num_restarts=ov.get('num_restarts', 2),
             bound_embeddings=ov.get('bound_embeddings', True),
             posttrain=ov.get('posttrain', False),
@@ -1157,6 +1157,7 @@ def _run_experiment(spec: dict) -> tuple:
             posttrain_anchor_batch=ov.get('posttrain_anchor_batch', 64),
             nashconv_baseline_samples=ov.get('nashconv_baseline_samples', 8),
             log_real_values=ov.get('log_real_values', False),
+            live_view=ov.get('live_view', False),
             value_function_cache_dir=ov.get('value_function_cache_dir', None),
             value_function_cache_ignore=ov.get('value_function_cache_ignore', False),
             plot_landscape=ov.get('plot_landscape', False),
@@ -1164,7 +1165,7 @@ def _run_experiment(spec: dict) -> tuple:
             landscape_grid_size=ov.get('landscape_grid_size', 25),
             trust_region=ov.get('trust_region', False),
             trust_region_quantile=ov.get('trust_region_quantile', 1.0),
-            trust_region_scale=ov.get('trust_region_scale', 2.0),
+            trust_region_scale=ov.get('trust_region_scale', 1.0),
             exact_payoff_targets=ov.get('exact_payoff_targets', False))
         result = run_task_f(game=game, p1_policies=policies, p1_embeddings=embeddings,
                             p2_policies=p2_policies, p2_embeddings=p2_embeddings,
@@ -1211,6 +1212,8 @@ if __name__ == "__main__":
                          help="Task F: ignore any cached value function and retrain from scratch (still refreshes the cache)")
     _parser.add_argument("--f-optimizer", choices=["gradient", "cem", "mppi"], default=None,
                          help="Task F: embedding-space optimizer (overrides the spec default)")
+    _parser.add_argument("--f-live", action="store_true",
+                         help="Task F: stream solve steps to figures/task_f/live/ for the live web viewer (serve_live.py)")
     _args = _parser.parse_args()
 
     # run_all()
@@ -1267,10 +1270,10 @@ if __name__ == "__main__":
     if RUN_NEUPL:
         if game_name == "leduc_poker":
             for use_randall_loss in [True, False]:
-                # chosen = select_neupl_directory(game_name, use_randall_loss, hidden_size=256)
+                chosen = select_neupl_directory(game_name, use_randall_loss, hidden_size=256)
                 for s in range(3):
-                    neupl_run_dirs[(use_randall_loss, s)] = LEDUC_RUNS_TO_LOAD[use_randall_loss][s]
-                    # neupl_run_dirs[(use_randall_loss, s)] = chosen
+                    # neupl_run_dirs[(use_randall_loss, s)] = LEDUC_RUNS_TO_LOAD[use_randall_loss][s]
+                    neupl_run_dirs[(use_randall_loss, s)] = chosen
         else:
             for use_randall_loss in [True, False]:
                 chosen = select_neupl_directory(game_name, use_randall_loss, hidden_size=256)
@@ -1419,10 +1422,14 @@ if __name__ == "__main__":
         # --f-optimizer, when given, overrides the Task F optimizer.
         if spec.get('task') == 'f' and _args.f_optimizer is not None:
             spec.setdefault('task_f_overrides', {})['optimizer'] = _args.f_optimizer
+        # --f-live enables live streaming to the web viewer.
+        if spec.get('task') == 'f' and _args.f_live:
+            spec.setdefault('task_f_overrides', {})['live_view'] = True
 
     if _args.no_multiprocessing:
         logger.info(f"Running {len(specs)} jobs sequentially (no multiprocessing)")
-        for spec in tqdm(specs, desc="Jobs"):
+        # No progress bar for a single job -- it would just be noise around the one run.
+        for spec in tqdm(specs, desc="Jobs", disable=len(specs) <= 1):
             try:
                 exp_info, result = _run_experiment(spec)
                 register_result(exp_info, result, save=True)
